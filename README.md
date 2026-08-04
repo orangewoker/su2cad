@@ -83,6 +83,53 @@ python -m pip install -r "$env:USERPROFILE\.codex\skills\su2cad\requirements.txt
 pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_open.ps1"
 ```
 
+## 桌面应用
+
+`dev` 分支包含不依赖 Codex 的 Windows 桌面应用。它直接连接本机 SketchUp Bridge，并在窗口中完成参数设置、进度显示、DXF 生成和 CAD 打开。
+
+下载 GitHub Release 中的 `SU2CAD-0.1.0-windows-x64.zip`，完整解压后运行：
+
+```text
+SU2CAD\SU2CAD.exe
+```
+
+不要只复制单独的 EXE，`_internal` 目录包含 Python、Tk、NumPy 和 DXF 引擎运行时。
+
+第一版桌面功能包括：
+
+- SketchUp Bridge 与 AutoCAD/天正连接状态
+- 当前模型名称和 SketchUp 版本
+- 输出目录与最近生成文件
+- 自动或固定 A0-A4 图幅
+- 高密度块轻量化参数
+- 总尺寸、遮挡、剖切可见性和自动打开 CAD 开关
+- 后台导出、阶段进度、取消请求和运行日志
+- `%APPDATA%\SU2CAD\settings.json` 设置持久化
+
+源码启动：
+
+```powershell
+python .\app\su2cad_app.py
+```
+
+构建 Windows 应用：
+
+```powershell
+pwsh -NoProfile -File .\build_app.ps1
+```
+
+构建结果：
+
+```text
+dist\SU2CAD\SU2CAD.exe
+```
+
+桌面应用会将设置和最近输出记录保存在：
+
+```text
+%APPDATA%\SU2CAD\settings.json
+```
+
 默认输出目录：
 
 ```text
@@ -171,7 +218,12 @@ DXF 必须具有统一真实比例，因此透视相机会保留方向和向上�
 su2cad/
 ├── SKILL.md
 ├── README.md
+├── SU2CAD.spec
+├── build_app.ps1
 ├── requirements.txt
+├── app/
+│   ├── core.py
+│   └── su2cad_app.py
 ├── agents/
 │   └── openai.yaml
 ├── references/
