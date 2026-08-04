@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+scripts/vendor/
+*.json
+*.dxf
+*.dwg
+.DS_Store
+Thumbs.db

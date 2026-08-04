@@ -1,0 +1,4 @@
+interface:
+  display_name: "SU2CAD"
+  short_description: "Export optimized SketchUp views to adaptive CAD sheets"
+  default_prompt: "Use $su2cad to convert the active SketchUp view into an optimized, dimensioned CAD drawing with an adaptive paper layout."
