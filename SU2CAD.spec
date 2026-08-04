@@ -1,16 +1,18 @@
 from pathlib import Path
 import sys
+from PyInstaller.utils.hooks import collect_data_files
 
 
 root = Path(SPECPATH)
 sys.path.insert(0, str(root / "app"))
 sys.path.insert(0, str(root / "scripts"))
+customtkinter_data = collect_data_files("customtkinter")
 
 a = Analysis(
     [str(root / "app" / "su2cad_app.py")],
     pathex=[str(root), str(root / "app"), str(root / "scripts")],
     binaries=[],
-    datas=[(str(root / "scripts" / "export_current_view.rb"), "scripts")],
+    datas=[(str(root / "scripts" / "export_current_view.rb"), "scripts"), *customtkinter_data],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

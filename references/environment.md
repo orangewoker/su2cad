@@ -8,10 +8,11 @@
 
 ## SketchUp Bridge
 
-The exporter expects:
+The exporter accepts either bridge plug-in name:
 
 ```text
 %APPDATA%\SketchUp\SketchUp 2026\SketchUp\Plugins\codex_sketchup_bridge\main.rb
+%APPDATA%\SketchUp\SketchUp 2026\SketchUp\Plugins\su2cad_bridge\main.rb
 http://127.0.0.1:8765/health
 ```
 
@@ -21,7 +22,7 @@ If health is unavailable:
 
 1. Keep SketchUp open.
 2. Open `Extensions > Codex Bridge > Start`.
-3. Retry the health endpoint.
+3. Retry the health endpoint. The standalone desktop app does not require Codex to be open.
 
 ## Output
 
@@ -31,5 +32,4 @@ Default directory:
 %USERPROFILE%\Desktop\SketchUp-CAD
 ```
 
-Each run creates a timestamped linework JSON and DXF. The DXF contains 1:1 model-space geometry, overall dimensions, and an A3 paper-space layout.
-
+Each run creates a timestamped linework JSON and DXF. The DXF contains 1:1 model-space geometry, RGB material HATCH entities, overall dimensions, and an automatically sized A-series paper-space layout.

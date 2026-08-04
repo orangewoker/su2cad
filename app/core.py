@@ -14,7 +14,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -44,6 +44,7 @@ class ExportSettings:
     max_block_lines: int = 2500
     dimensions: bool = True
     occlusion: bool = True
+    material_fills: bool = True
     strict_section_occlusion: bool = True
     open_in_cad: bool = True
 
@@ -60,6 +61,8 @@ class ExportResult:
     scale: str
     block_references: int
     plant_block_references: int
+    material_hatches: int
+    material_count: int
     simplified_blocks: int
     block_lines_before: int
     block_lines_after: int
@@ -203,7 +206,8 @@ def export_current_view(
         "result = SketchupCurrentViewCad.export("
         f"'{_ruby_literal(str(json_path))}', "
         f"occlusion: {'true' if settings.occlusion else 'false'}, "
-        f"strict_section_occlusion: {'true' if settings.strict_section_occlusion else 'false'}"
+        f"strict_section_occlusion: {'true' if settings.strict_section_occlusion else 'false'}, "
+        f"materials: {'true' if settings.material_fills else 'false'}"
         "); puts JSON.generate(result); result"
     )
     request_body = {
@@ -226,7 +230,7 @@ def export_current_view(
         raise RuntimeError("SketchUp 未生成有效线稿 JSON")
     _check_cancelled(is_cancelled)
 
-    progress(62, "正在生成并轻量化 DXF")
+    progress(62, "正在计算材质色块并生成 DXF")
     builder_result = build_dxf(
         json_path,
         provisional_dxf,
@@ -262,6 +266,8 @@ def export_current_view(
         scale=str(builder_result["scale"]),
         block_references=int(builder_result["blockReferences"]),
         plant_block_references=int(builder_result["plantBlockReferences"]),
+        material_hatches=int(builder_result["materialHatches"]),
+        material_count=int(builder_result["materialCount"]),
         simplified_blocks=int(builder_result["simplifiedBlocks"]),
         block_lines_before=int(builder_result["blockLinesBeforeOptimization"]),
         block_lines_after=int(builder_result["blockLinesAfterOptimization"]),

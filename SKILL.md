@@ -1,6 +1,6 @@
 ---
 name: su2cad
-description: Convert the active Windows SketchUp desktop model's current view into fast, continuous AutoCAD linework without SketchUp's DWG/DXF exporter. Use when Codex must read the open SketchUp view, remove occluded edges, merge line fragments, fit curves as CAD arcs or splines, preserve real millimeter dimensions, add overall dimensions and an automatically sized/oriented A-series paper-space layout, and open the generated DXF in AutoCAD or Tianzheng CAD.
+description: Convert the active Windows SketchUp viewport into lightweight AutoCAD linework and RGB material hatches without SketchUp's DWG/DXF exporter. Use when Codex must remove occluded or off-screen geometry, preserve components as CAD blocks, fit curves, retain real millimeter dimensions, add overall dimensions and an automatically sized/oriented A-series paper-space layout, and open the generated DXF in AutoCAD or Tianzheng CAD.
 ---
 
 # SU2CAD
@@ -24,11 +24,13 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 
 - Always output model-space geometry at 1:1 millimeters.
 - For a perspective source camera, keep its direction and up vector but use orthographic projection. State this behavior because perspective geometry cannot carry consistent true dimensions.
+- Clip projected lines, curves, faces, and blocks to the active SketchUp viewport; do not export geometry outside the current window.
 - Do not invoke SketchUp's native DWG/DXF exporter.
 - Keep hidden tags, hidden entities, and non-profile softened mesh edges out of linework.
 - For softened or smoothed geometry, restore only view-direction silhouette edges; do not emit triangulation seams.
 - When an active SketchUp section plane exists, clip geometry to its kept side and generate true face-plane intersection lines on `SU-SUCAD-SECTION`.
 - Enable ray-test occlusion by default. Use `-DisableOcclusion` only for diagnosis or unusually large models.
+- Treat any ray-test exception as an export failure instead of silently deleting uncertain geometry.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
 - Merge collinear fragments and write curves as one CAD circle, arc, spline, or polyline object.
@@ -39,6 +41,10 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Place block references on sanitized `SU-BLOCK_*` layers derived from SketchUp component or group names.
 - Limit dense mesh-derived block linework to spatially distributed representative lines while preserving block extents and insert coordinates.
 - Place vegetation blocks on `SU-PLANTS-BLOCKS` so they can be frozen or hidden as a unit.
+- Export visible SketchUp face materials as RGB solid CAD hatches while using unpainted foreground faces as non-printing occlusion masks.
+- Resolve projected material visibility with per-face depth planes so sloped and crossing surfaces are clipped at their actual depth boundary.
+- Draw opaque material regions before transparent regions and order transparent regions from far to near.
+- Dissolve and topology-preserving-simplify material boundaries before writing HATCH entities; keep plant HATCH entities on `SU-PLANTS-BLOCKS`.
 
 ## Drawing Rules
 
@@ -56,6 +62,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - `-OutputDirectory <path>`: choose output location.
 - `-NoOpen`: build and audit without launching AutoCAD.
 - `-NoDimensions`: omit overall dimensions.
+- `-NoMaterials`: omit SketchUp material color fills while retaining visible linework.
 - `-DisableOcclusion`: skip SketchUp ray testing for faster diagnostic output.
 - `-IncludeHiddenSectionEdges`: diagnostic full-edge section output; expect clutter.
 - `-MaxBlockLines <count>`: cap representative lines in each dense block; default `2500`, use `0` to disable optimization.
@@ -70,6 +77,7 @@ Require all of the following before declaring success:
 - `ezdxf.readfile()` succeeds.
 - DXF audit reports zero errors.
 - At least one line or curve exists.
+- When materials are enabled, HATCH entities preserve RGB/alpha, use valid boundary paths, and remain behind visible linework.
 - The reported layout exists, uses the reported standard paper dimensions, and its orientation matches the projected geometry.
 - The paper-space frame, full-width title strip, scale text, and viewport exist.
 - AutoCAD title changes to the generated DXF when opening was requested.

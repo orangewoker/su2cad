@@ -9,7 +9,9 @@ import traceback
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
 
 from core import (
     APP_VERSION,
@@ -22,208 +24,489 @@ from core import (
 )
 
 
-BG = "#f4f6f8"
-SURFACE = "#ffffff"
-TEXT = "#17202a"
-MUTED = "#68737d"
-BORDER = "#d8dee4"
-PRIMARY = "#1368ce"
-PRIMARY_ACTIVE = "#0f56ab"
-SUCCESS = "#16834b"
-DANGER = "#c23b3b"
-LOG_BG = "#17212b"
-LOG_TEXT = "#d9e2ea"
+BG = "#F5F7F9"
+SURFACE = "#FFFFFF"
+SURFACE_ALT = "#F0F3F6"
+BORDER = "#E0E5EA"
+TEXT = "#20262E"
+MUTED = "#6B7682"
+PRIMARY = "#2563EB"
+PRIMARY_HOVER = "#1D4ED8"
+SUCCESS = "#23865A"
+SUCCESS_SOFT = "#E8F5EE"
+WARNING = "#B66A11"
+WARNING_SOFT = "#FFF4E5"
+ERROR = "#C2414D"
+ERROR_SOFT = "#FCEBEC"
+
+QUALITY_LINES = {"轻量": 800, "平衡": 2500, "精细": 6000}
 
 
 def enable_high_dpi() -> None:
     if os.name != "nt":
         return
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except Exception:
         try:
-            ctypes.windll.user32.SetProcessDPIAware()
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except Exception:
             pass
 
 
 class SU2CADApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         self.root.title(f"SU2CAD {APP_VERSION}")
-        self.root.geometry("1080x720")
-        self.root.minsize(940, 640)
-        self.root.configure(bg=BG)
+        self.root.geometry("1180x760")
+        self.root.minsize(1040, 700)
+        self.root.configure(fg_color=BG)
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.cancel_event = threading.Event()
         self.export_thread: threading.Thread | None = None
         self.status_refreshing = False
+        self.sketchup_connected = False
         self.last_result: ExportResult | None = None
+        self.recent_row_widgets: list[ctk.CTkBaseClass] = []
+        self.log_visible = False
+        self.advanced_visible = False
         self.settings_path = Path(os.environ.get("APPDATA", str(Path.home()))) / "SU2CAD" / "settings.json"
         self.saved = self._load_settings()
+        try:
+            saved_max_lines = max(0, int(self.saved.get("max_block_lines", 2500)))
+        except (TypeError, ValueError):
+            saved_max_lines = 2500
 
         self.output_var = tk.StringVar(
             value=self.saved.get("output_directory", str(Path.home() / "Desktop" / "SketchUp-CAD"))
         )
         self.paper_var = tk.StringVar(value=self.saved.get("paper_size", "AUTO"))
-        self.max_lines_var = tk.IntVar(value=int(self.saved.get("max_block_lines", 2500)))
+        self.max_lines_var = tk.StringVar(value=str(saved_max_lines))
+        self.quality_var = tk.StringVar(value=self._quality_for_lines(saved_max_lines))
         self.dimensions_var = tk.BooleanVar(value=bool(self.saved.get("dimensions", True)))
         self.occlusion_var = tk.BooleanVar(value=bool(self.saved.get("occlusion", True)))
+        self.materials_var = tk.BooleanVar(value=bool(self.saved.get("material_fills", True)))
         self.strict_section_var = tk.BooleanVar(value=bool(self.saved.get("strict_section_occlusion", True)))
         self.open_cad_var = tk.BooleanVar(value=bool(self.saved.get("open_in_cad", True)))
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_text_var = tk.StringVar(value="就绪")
-        self.model_var = tk.StringVar(value="等待连接 SketchUp")
+        self.model_var = tk.StringVar(value="正在检测 SketchUp")
+        self.phase_var = tk.StringVar(value="等待任务")
+        self.result_title_var = tk.StringVar(value="准备生成 CAD")
+        self.result_detail_var = tk.StringVar(value="连接 SketchUp 后即可导出当前视图")
 
-        self._configure_styles()
         self._build_ui()
-        self._restore_recent()
+        self._rebuild_recent()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._drain_events)
         self.root.after(200, self._refresh_status)
         self._log(f"SU2CAD {APP_VERSION} 已启动")
 
-    def _configure_styles(self) -> None:
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        style.configure("TFrame", background=BG)
-        style.configure("Surface.TFrame", background=SURFACE)
-        style.configure("TLabel", background=BG, foreground=TEXT, font=("Microsoft YaHei UI", 10))
-        style.configure("Surface.TLabel", background=SURFACE, foreground=TEXT, font=("Microsoft YaHei UI", 10))
-        style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Microsoft YaHei UI", 20, "bold"))
-        style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
-        style.configure("Section.TLabel", background=SURFACE, foreground=TEXT, font=("Microsoft YaHei UI", 11, "bold"))
-        style.configure("Muted.TLabel", background=SURFACE, foreground=MUTED, font=("Microsoft YaHei UI", 9))
-        style.configure("Connected.TLabel", background=SURFACE, foreground=SUCCESS, font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("Disconnected.TLabel", background=SURFACE, foreground=DANGER, font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"), padding=(18, 10), foreground="#ffffff", background=PRIMARY)
-        style.map("Primary.TButton", background=[("active", PRIMARY_ACTIVE), ("disabled", "#9bb9db")])
-        style.configure("TButton", font=("Microsoft YaHei UI", 9), padding=(12, 7))
-        style.configure("TCheckbutton", background=SURFACE, foreground=TEXT, font=("Microsoft YaHei UI", 9))
-        style.configure("TCombobox", padding=5)
-        style.configure("TEntry", padding=6)
-        style.configure("Horizontal.TProgressbar", background=PRIMARY, troughcolor="#dce4ec", thickness=8)
-        style.configure("Treeview", rowheight=28, font=("Microsoft YaHei UI", 9), background=SURFACE, fieldbackground=SURFACE)
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
+    @staticmethod
+    def _quality_for_lines(value: int) -> str:
+        return min(QUALITY_LINES, key=lambda name: abs(QUALITY_LINES[name] - value))
 
     def _build_ui(self) -> None:
-        container = ttk.Frame(self.root, padding=(28, 22, 28, 20))
-        container.pack(fill="both", expand=True)
-        container.columnconfigure(0, weight=0, minsize=360)
-        container.columnconfigure(1, weight=1)
-        container.rowconfigure(2, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_rowconfigure(1, weight=1)
 
-        title = ttk.Label(container, text="SU2CAD", style="Title.TLabel")
-        title.grid(row=0, column=0, sticky="w")
-        subtitle = ttk.Label(container, text="SketchUp 当前视图转轻量 CAD", style="Subtitle.TLabel")
-        subtitle.grid(row=1, column=0, sticky="w", pady=(0, 16))
+        self._build_header()
+        self._build_content()
+        self._build_footer()
 
-        status = ttk.Frame(container, style="Surface.TFrame", padding=(18, 12))
-        status.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(24, 0), pady=(0, 16))
-        status.columnconfigure(2, weight=1)
-        ttk.Label(status, text="SketchUp", style="Surface.TLabel").grid(row=0, column=0, sticky="w")
-        self.sketchup_status = ttk.Label(status, text="检测中", style="Disconnected.TLabel")
-        self.sketchup_status.grid(row=0, column=1, sticky="w", padx=(10, 24))
-        self.cad_status = ttk.Label(status, text="CAD 检测中", style="Disconnected.TLabel")
-        self.cad_status.grid(row=0, column=3, sticky="e")
-        ttk.Label(status, textvariable=self.model_var, style="Muted.TLabel").grid(
-            row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+    def _build_header(self) -> None:
+        header = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=94)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+        header.grid_propagate(False)
+
+        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand.grid(row=0, column=0, padx=(28, 24), pady=18, sticky="w")
+        ctk.CTkLabel(brand, text="SU2CAD", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 22, "bold")).pack(anchor="w")
+        ctk.CTkLabel(
+            brand,
+            text="SketchUp 可见视图转轻量 CAD",
+            text_color=MUTED,
+            font=ctk.CTkFont("Microsoft YaHei UI", 12),
+        ).pack(anchor="w", pady=(2, 0))
+
+        model = ctk.CTkFrame(header, fg_color="transparent")
+        model.grid(row=0, column=1, padx=12, pady=18, sticky="w")
+        ctk.CTkLabel(model, text="当前模型", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).pack(anchor="w")
+        ctk.CTkLabel(
+            model,
+            textvariable=self.model_var,
+            text_color=TEXT,
+            font=ctk.CTkFont("Microsoft YaHei UI", 14, "bold"),
+        ).pack(anchor="w", pady=(4, 0))
+
+        status = ctk.CTkFrame(header, fg_color="transparent")
+        status.grid(row=0, column=2, padx=(12, 28), pady=18, sticky="e")
+        self.sketchup_chip = ctk.CTkLabel(
+            status,
+            text="SketchUp 检测中",
+            width=132,
+            height=32,
+            corner_radius=8,
+            fg_color=WARNING_SOFT,
+            text_color=WARNING,
+            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
         )
-
-        settings = ttk.Frame(container, style="Surface.TFrame", padding=18)
-        settings.grid(row=2, column=0, sticky="nsew")
-        settings.columnconfigure(0, weight=1)
-        ttk.Label(settings, text="导出设置", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-
-        ttk.Label(settings, text="输出目录", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(16, 5))
-        output_row = ttk.Frame(settings, style="Surface.TFrame")
-        output_row.grid(row=2, column=0, sticky="ew")
-        output_row.columnconfigure(0, weight=1)
-        self.output_entry = ttk.Entry(output_row, textvariable=self.output_var)
-        self.output_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(output_row, text="浏览", command=self._browse_output).grid(row=0, column=1, padx=(8, 0))
-
-        options = ttk.Frame(settings, style="Surface.TFrame")
-        options.grid(row=3, column=0, sticky="ew", pady=(16, 0))
-        options.columnconfigure(0, weight=1)
-        options.columnconfigure(1, weight=1)
-        ttk.Label(options, text="图幅", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(options, text="块最大线数", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
-        self.paper_combo = ttk.Combobox(
-            options,
-            textvariable=self.paper_var,
-            values=("AUTO", "A4", "A3", "A2", "A1", "A0"),
-            state="readonly",
-            width=12,
+        self.sketchup_chip.grid(row=0, column=0, padx=(0, 8))
+        self.cad_chip = ctk.CTkLabel(
+            status,
+            text="CAD 检测中",
+            width=116,
+            height=32,
+            corner_radius=8,
+            fg_color=WARNING_SOFT,
+            text_color=WARNING,
+            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
         )
-        self.paper_combo.grid(row=1, column=0, sticky="ew", pady=(5, 0))
-        self.max_lines_spin = ttk.Spinbox(options, from_=0, to=1000000, increment=500, textvariable=self.max_lines_var, width=12)
-        self.max_lines_spin.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(5, 0))
+        self.cad_chip.grid(row=0, column=1, padx=(0, 8))
+        ctk.CTkButton(
+            status,
+            text="刷新",
+            width=64,
+            height=32,
+            corner_radius=8,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER,
+            text_color=TEXT,
+            command=self._refresh_status_now,
+        ).grid(row=0, column=2)
 
-        checks = ttk.Frame(settings, style="Surface.TFrame")
-        checks.grid(row=4, column=0, sticky="ew", pady=(16, 0))
-        self.dimension_check = ttk.Checkbutton(checks, text="生成总尺寸", variable=self.dimensions_var)
-        self.dimension_check.grid(row=0, column=0, sticky="w")
-        self.occlusion_check = ttk.Checkbutton(checks, text="遮挡判断", variable=self.occlusion_var)
-        self.occlusion_check.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.section_check = ttk.Checkbutton(checks, text="严格剖切可见性", variable=self.strict_section_var)
-        self.section_check.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.open_cad_check = ttk.Checkbutton(checks, text="完成后打开 CAD", variable=self.open_cad_var)
-        self.open_cad_check.grid(row=3, column=0, sticky="w", pady=(8, 0))
+    def _build_content(self) -> None:
+        content = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
+        content.grid(row=1, column=0, sticky="nsew", padx=24, pady=20)
+        content.grid_columnconfigure(0, minsize=360)
+        content.grid_columnconfigure(1, weight=1)
+        content.grid_rowconfigure(0, weight=1)
 
-        ttk.Separator(settings).grid(row=5, column=0, sticky="ew", pady=18)
-        self.export_button = ttk.Button(settings, text="生成 CAD", style="Primary.TButton", command=self._start_export)
-        self.export_button.grid(row=6, column=0, sticky="ew")
-        self.cancel_button = ttk.Button(settings, text="取消", command=self._cancel_export, state="disabled")
-        self.cancel_button.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        self._build_settings_card(content)
+        self._build_workspace_card(content)
 
-        right = ttk.Frame(container)
-        right.grid(row=2, column=1, sticky="nsew", padx=(24, 0))
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(3, weight=1)
+    def _build_settings_card(self, parent: ctk.CTkFrame) -> None:
+        card = ctk.CTkScrollableFrame(
+            parent,
+            fg_color=SURFACE,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER,
+            scrollbar_fg_color=SURFACE,
+            scrollbar_button_color="#C7D0D9",
+            scrollbar_button_hover_color="#AEB9C4",
+        )
+        self.settings_card = card
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        card.grid_columnconfigure(0, weight=1)
 
-        progress_header = ttk.Frame(right)
-        progress_header.grid(row=0, column=0, sticky="ew")
-        progress_header.columnconfigure(0, weight=1)
-        ttk.Label(progress_header, text="任务进度", font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(progress_header, textvariable=self.progress_text_var, style="Subtitle.TLabel").grid(row=0, column=1, sticky="e")
-        ttk.Progressbar(right, variable=self.progress_var, maximum=100).grid(row=1, column=0, sticky="ew", pady=(8, 14))
+        ctk.CTkLabel(card, text="导出设置", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 16, "bold")).grid(
+            row=0, column=0, padx=20, pady=(20, 4), sticky="w"
+        )
+        ctk.CTkLabel(
+            card,
+            text="控制图纸表达和几何精度",
+            text_color=MUTED,
+            font=ctk.CTkFont("Microsoft YaHei UI", 11),
+        ).grid(row=1, column=0, padx=20, pady=(0, 18), sticky="w")
 
-        recent_header = ttk.Frame(right)
-        recent_header.grid(row=2, column=0, sticky="ew")
-        recent_header.columnconfigure(0, weight=1)
-        ttk.Label(recent_header, text="最近输出", font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Button(recent_header, text="打开文件", command=self._open_selected).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(recent_header, text="打开目录", command=self._open_output_folder).grid(row=0, column=2, padx=(8, 0))
+        ctk.CTkLabel(card, text="标准图幅", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+            row=2, column=0, padx=20, sticky="w"
+        )
+        self.paper_segment = ctk.CTkSegmentedButton(
+            card,
+            values=["AUTO", "A4", "A3", "A2", "A1", "A0"],
+            variable=self.paper_var,
+            height=34,
+            corner_radius=7,
+            selected_color=PRIMARY,
+            selected_hover_color=PRIMARY_HOVER,
+            unselected_color=SURFACE_ALT,
+            unselected_hover_color=BORDER,
+            text_color=TEXT,
+        )
+        self.paper_segment.grid(row=3, column=0, padx=20, pady=(8, 20), sticky="ew")
 
-        self.recent_tree = ttk.Treeview(right, columns=("time", "file", "layout", "size"), show="headings", height=6)
-        self.recent_tree.heading("time", text="时间")
-        self.recent_tree.heading("file", text="文件")
-        self.recent_tree.heading("layout", text="图幅")
-        self.recent_tree.heading("size", text="大小")
-        self.recent_tree.column("time", width=120, anchor="w", stretch=False)
-        self.recent_tree.column("file", width=300, anchor="w")
-        self.recent_tree.column("layout", width=80, anchor="center", stretch=False)
-        self.recent_tree.column("size", width=80, anchor="e", stretch=False)
-        self.recent_tree.grid(row=3, column=0, sticky="nsew", pady=(8, 14))
-        self.recent_tree.bind("<Double-1>", lambda _event: self._open_selected())
+        self._add_switch(card, 4, "仅输出可见线", "隐藏墙后、内部及背面线条", self.occlusion_var)
+        self._add_switch(card, 5, "材质色块", "SketchUp 材质转换为 CAD 实色填充", self.materials_var)
+        self._add_switch(card, 6, "生成总尺寸", "自动标注图形总宽与总高", self.dimensions_var)
+        self._add_switch(card, 7, "完成后打开 CAD", "输出后自动切换到 AutoCAD / 天正", self.open_cad_var)
 
-        ttk.Label(right, text="运行日志", font=("Microsoft YaHei UI", 11, "bold")).grid(row=4, column=0, sticky="w")
-        self.log_text = tk.Text(
-            right,
-            height=9,
-            bg=LOG_BG,
-            fg=LOG_TEXT,
-            insertbackground=LOG_TEXT,
-            relief="flat",
-            padx=12,
-            pady=10,
-            font=("Cascadia Mono", 9),
-            wrap="word",
+        ctk.CTkLabel(card, text="线稿精度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+            row=8, column=0, padx=20, pady=(18, 0), sticky="w"
+        )
+        self.quality_segment = ctk.CTkSegmentedButton(
+            card,
+            values=list(QUALITY_LINES),
+            variable=self.quality_var,
+            command=self._set_quality,
+            height=36,
+            corner_radius=7,
+            selected_color="#334155",
+            selected_hover_color="#1F2937",
+            unselected_color=SURFACE_ALT,
+            unselected_hover_color=BORDER,
+            text_color=TEXT,
+        )
+        self.quality_segment.grid(row=9, column=0, padx=20, pady=(8, 14), sticky="ew")
+
+        self.advanced_button = ctk.CTkButton(
+            card,
+            text="高级设置",
+            height=32,
+            fg_color="transparent",
+            hover_color=SURFACE_ALT,
+            text_color=MUTED,
+            anchor="w",
+            command=self._toggle_advanced,
+        )
+        self.advanced_button.grid(row=10, column=0, padx=14, sticky="ew")
+        self.advanced_frame = ctk.CTkFrame(card, fg_color=SURFACE_ALT, corner_radius=8)
+        self.advanced_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(self.advanced_frame, text="块最大线数", text_color=TEXT).grid(row=0, column=0, padx=12, pady=12, sticky="w")
+        ctk.CTkEntry(self.advanced_frame, textvariable=self.max_lines_var, width=110, height=32).grid(
+            row=0, column=1, padx=12, pady=12, sticky="e"
+        )
+        ctk.CTkSwitch(
+            self.advanced_frame,
+            text="严格剖切可见性",
+            variable=self.strict_section_var,
+            progress_color=PRIMARY,
+            button_color=SURFACE,
+            button_hover_color=BORDER,
+        ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
+        self.advanced_frame.grid(row=11, column=0, padx=20, pady=(6, 20), sticky="ew")
+        self.advanced_frame.grid_remove()
+
+    def _add_switch(self, parent, row: int, title: str, detail: str, variable: tk.BooleanVar) -> None:
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid(row=row, column=0, padx=20, pady=5, sticky="ew")
+        frame.grid_columnconfigure(0, weight=1)
+        text = ctk.CTkFrame(frame, fg_color="transparent")
+        text.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(text, text=title, text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(text, text=detail, text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(1, 0))
+        ctk.CTkSwitch(
+            frame,
+            text="",
+            width=44,
+            variable=variable,
+            progress_color=PRIMARY,
+            button_color=SURFACE,
+            button_hover_color=BORDER,
+        ).grid(row=0, column=1, sticky="e")
+
+    def _build_workspace_card(self, parent: ctk.CTkFrame) -> None:
+        card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=8, border_width=1, border_color=BORDER)
+        card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=1)
+
+        self.tabs = ctk.CTkTabview(
+            card,
+            fg_color=SURFACE,
+            segmented_button_selected_color=PRIMARY,
+            segmented_button_selected_hover_color=PRIMARY_HOVER,
+            segmented_button_unselected_color=SURFACE_ALT,
+            segmented_button_unselected_hover_color=BORDER,
+            text_color=TEXT,
+        )
+        self.tabs.grid(row=0, column=0, sticky="nsew", padx=14, pady=12)
+        task = self.tabs.add("当前任务")
+        recent = self.tabs.add("最近输出")
+        self._build_task_tab(task)
+        self._build_recent_tab(recent)
+
+    def _build_task_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(4, weight=1)
+
+        state = ctk.CTkFrame(tab, fg_color=SURFACE_ALT, corner_radius=8)
+        state.grid(row=0, column=0, padx=8, pady=(18, 14), sticky="ew")
+        state.grid_columnconfigure(0, weight=1)
+        self.state_badge = ctk.CTkLabel(
+            state,
+            text="就绪",
+            width=72,
+            height=28,
+            corner_radius=7,
+            fg_color=SUCCESS_SOFT,
+            text_color=SUCCESS,
+            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+        )
+        self.state_badge.grid(row=0, column=0, padx=18, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(
+            state,
+            textvariable=self.result_title_var,
+            text_color=TEXT,
+            font=ctk.CTkFont("Microsoft YaHei UI", 18, "bold"),
+        ).grid(row=1, column=0, padx=18, pady=(4, 2), sticky="w")
+        ctk.CTkLabel(
+            state,
+            textvariable=self.result_detail_var,
+            text_color=MUTED,
+            font=ctk.CTkFont("Microsoft YaHei UI", 11),
+            wraplength=600,
+            justify="left",
+        ).grid(row=2, column=0, padx=18, pady=(2, 16), sticky="w")
+
+        phase = ctk.CTkFrame(tab, fg_color="transparent")
+        phase.grid(row=1, column=0, padx=8, sticky="ew")
+        phase.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(phase, text="任务进度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        ctk.CTkLabel(phase, textvariable=self.phase_var, text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).grid(
+            row=0, column=1, sticky="e"
+        )
+        self.progress = ctk.CTkProgressBar(tab, height=9, corner_radius=5, progress_color=PRIMARY, fg_color=BORDER)
+        self.progress.grid(row=2, column=0, padx=8, pady=(8, 18), sticky="ew")
+        self.progress.set(0)
+
+        actions = ctk.CTkFrame(tab, fg_color="transparent")
+        actions.grid(row=3, column=0, padx=8, sticky="w")
+        self.open_file_button = ctk.CTkButton(
+            actions,
+            text="打开 CAD",
+            width=104,
+            height=34,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER,
+            text_color=TEXT,
+            command=self._open_last_result,
             state="disabled",
         )
-        self.log_text.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        self.open_file_button.grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkButton(
+            actions,
+            text="打开目录",
+            width=104,
+            height=34,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER,
+            text_color=TEXT,
+            command=self._open_output_folder,
+        ).grid(row=0, column=1)
+
+        log_area = ctk.CTkFrame(tab, fg_color="transparent")
+        log_area.grid(row=5, column=0, padx=8, pady=(16, 8), sticky="sew")
+        log_area.grid_columnconfigure(0, weight=1)
+        self.log_button = ctk.CTkButton(
+            log_area,
+            text="查看详细日志",
+            height=30,
+            fg_color="transparent",
+            hover_color=SURFACE_ALT,
+            text_color=MUTED,
+            anchor="w",
+            command=self._toggle_log,
+        )
+        self.log_button.grid(row=0, column=0, sticky="ew")
+        self.log_text = ctk.CTkTextbox(
+            log_area,
+            height=150,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER,
+            fg_color="#FAFBFC",
+            text_color="#435160",
+            font=("Cascadia Mono", 10),
+            wrap="word",
+        )
+        self.log_text.grid(row=1, column=0, pady=(6, 0), sticky="ew")
+        self.log_text.grid_remove()
+
+    def _build_recent_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            tab,
+            text="最近生成的 CAD",
+            text_color=TEXT,
+            font=ctk.CTkFont("Microsoft YaHei UI", 16, "bold"),
+        ).grid(row=0, column=0, padx=8, pady=(18, 8), sticky="w")
+        self.recent_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent", corner_radius=0)
+        self.recent_frame.grid(row=1, column=0, padx=0, pady=(0, 8), sticky="nsew")
+        self.recent_frame.grid_columnconfigure(0, weight=1)
+
+    def _build_footer(self) -> None:
+        footer = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=86)
+        footer.grid(row=2, column=0, sticky="ew")
+        footer.grid_columnconfigure(1, weight=1)
+        footer.grid_propagate(False)
+
+        ctk.CTkLabel(footer, text="输出目录", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).grid(
+            row=0, column=0, padx=(28, 10), pady=23, sticky="w"
+        )
+        self.output_entry = ctk.CTkEntry(
+            footer,
+            textvariable=self.output_var,
+            height=40,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER,
+            fg_color="#FAFBFC",
+        )
+        self.output_entry.grid(row=0, column=1, pady=23, sticky="ew")
+        ctk.CTkButton(
+            footer,
+            text="浏览",
+            width=72,
+            height=40,
+            corner_radius=8,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER,
+            text_color=TEXT,
+            command=self._browse_output,
+        ).grid(row=0, column=2, padx=(10, 16), pady=23)
+        self.cancel_button = ctk.CTkButton(
+            footer,
+            text="取消",
+            width=78,
+            height=42,
+            corner_radius=8,
+            fg_color=ERROR_SOFT,
+            hover_color="#F7D9DC",
+            text_color=ERROR,
+            command=self._cancel_export,
+        )
+        self.cancel_button.grid(row=0, column=3, padx=(0, 10), pady=22)
+        self.cancel_button.grid_remove()
+        self.export_button = ctk.CTkButton(
+            footer,
+            text="生成 CAD",
+            width=142,
+            height=44,
+            corner_radius=8,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            font=ctk.CTkFont("Microsoft YaHei UI", 13, "bold"),
+            command=self._start_export,
+            state="disabled",
+        )
+        self.export_button.grid(row=0, column=4, padx=(0, 28), pady=21)
+
+    def _toggle_advanced(self) -> None:
+        self.advanced_visible = not self.advanced_visible
+        if self.advanced_visible:
+            self.advanced_frame.grid()
+            self.advanced_button.configure(text="收起高级设置")
+        else:
+            self.advanced_frame.grid_remove()
+            self.advanced_button.configure(text="高级设置")
+
+    def _toggle_log(self) -> None:
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log_text.grid()
+            self.log_button.configure(text="收起详细日志")
+        else:
+            self.log_text.grid_remove()
+            self.log_button.configure(text="查看详细日志")
+
+    def _set_quality(self, value: str) -> None:
+        self.max_lines_var.set(str(QUALITY_LINES[value]))
 
     def _load_settings(self) -> dict:
         try:
@@ -232,12 +515,20 @@ class SU2CADApp:
             return {}
 
     def _save_settings(self) -> None:
+        try:
+            max_block_lines = max(0, int(self.max_lines_var.get().strip()))
+        except (TypeError, ValueError, tk.TclError):
+            try:
+                max_block_lines = max(0, int(self.saved.get("max_block_lines", 2500)))
+            except (TypeError, ValueError):
+                max_block_lines = 2500
         data = {
             "output_directory": self.output_var.get(),
             "paper_size": self.paper_var.get(),
-            "max_block_lines": self.max_lines_var.get(),
+            "max_block_lines": max_block_lines,
             "dimensions": self.dimensions_var.get(),
             "occlusion": self.occlusion_var.get(),
+            "material_fills": self.materials_var.get(),
             "strict_section_occlusion": self.strict_section_var.get(),
             "open_in_cad": self.open_cad_var.get(),
             "recent": self.saved.get("recent", [])[:10],
@@ -246,49 +537,31 @@ class SU2CADApp:
         self.settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self.saved = data
 
-    def _restore_recent(self) -> None:
-        for item in self.saved.get("recent", []):
-            path = Path(item.get("path", ""))
-            self.recent_tree.insert(
-                "",
-                "end",
-                iid=str(path),
-                values=(item.get("time", ""), path.name, item.get("layout", ""), item.get("size", "")),
-            )
-
-    def _add_recent(self, result: ExportResult) -> None:
-        size = f"{result.dxf.stat().st_size / 1024 / 1024:.1f} MB"
-        record = {
-            "path": str(result.dxf),
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "layout": result.layout,
-            "size": size,
-        }
-        recent = [item for item in self.saved.get("recent", []) if item.get("path") != str(result.dxf)]
-        self.saved["recent"] = [record, *recent][:10]
-        for item in self.recent_tree.get_children():
-            self.recent_tree.delete(item)
-        self._restore_recent()
-        self._save_settings()
-
     def _browse_output(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.output_var.get(), title="选择 CAD 输出目录")
         if selected:
             self.output_var.set(selected)
 
     def _collect_settings(self) -> ExportSettings:
-        max_lines = int(self.max_lines_var.get())
+        max_lines_text = self.max_lines_var.get().strip()
+        if not max_lines_text:
+            raise ValueError("请输入块最大线数")
+        try:
+            max_lines = int(max_lines_text)
+        except ValueError as exc:
+            raise ValueError("块最大线数必须是整数") from exc
         if max_lines < 0:
             raise ValueError("块最大线数不能小于 0")
-        output = Path(self.output_var.get().strip())
-        if not str(output):
+        output_text = self.output_var.get().strip()
+        if not output_text:
             raise ValueError("请选择输出目录")
         return ExportSettings(
-            output_directory=output,
+            output_directory=Path(output_text),
             paper_size=self.paper_var.get(),
             max_block_lines=max_lines,
             dimensions=self.dimensions_var.get(),
             occlusion=self.occlusion_var.get(),
+            material_fills=self.materials_var.get(),
             strict_section_occlusion=self.strict_section_var.get(),
             open_in_cad=self.open_cad_var.get(),
         )
@@ -303,10 +576,15 @@ class SU2CADApp:
             return
         self._save_settings()
         self.cancel_event.clear()
-        self.progress_var.set(0)
-        self.progress_text_var.set("正在启动")
+        self.progress.set(0)
+        self.phase_var.set("正在启动")
+        self._set_state("处理中", WARNING, WARNING_SOFT)
+        self.result_title_var.set("正在读取当前视图")
+        self.result_detail_var.set("SketchUp 大模型可能需要数分钟，请保持模型窗口打开")
+        self.last_result = None
+        self.open_file_button.configure(state="disabled")
         self.export_button.configure(state="disabled")
-        self.cancel_button.configure(state="normal")
+        self.cancel_button.grid()
         self._log("开始导出当前 SketchUp 视图")
         self.export_thread = threading.Thread(target=self._export_worker, args=(settings,), daemon=True)
         self.export_thread.start()
@@ -327,12 +605,16 @@ class SU2CADApp:
     def _cancel_export(self) -> None:
         self.cancel_event.set()
         self.cancel_button.configure(state="disabled")
-        self.progress_text_var.set("等待当前阶段结束后取消")
+        self.phase_var.set("等待当前阶段结束后取消")
         self._log("已请求取消任务")
 
     def _set_idle(self) -> None:
-        self.export_button.configure(state="normal")
-        self.cancel_button.configure(state="disabled")
+        self.cancel_button.grid_remove()
+        self.cancel_button.configure(state="normal")
+        self.export_button.configure(state="normal" if self.sketchup_connected else "disabled")
+
+    def _set_state(self, text: str, color: str, soft_color: str) -> None:
+        self.state_badge.configure(text=text, text_color=color, fg_color=soft_color)
 
     def _drain_events(self) -> None:
         try:
@@ -340,8 +622,8 @@ class SU2CADApp:
                 event, payload = self.events.get_nowait()
                 if event == "progress":
                     value, message = payload  # type: ignore[misc]
-                    self.progress_var.set(value)
-                    self.progress_text_var.set(message)
+                    self.progress.set(float(value) / 100.0)
+                    self.phase_var.set(str(message))
                     self._log(str(message))
                 elif event == "success":
                     result = payload
@@ -349,28 +631,33 @@ class SU2CADApp:
                     self.last_result = result
                     self._add_recent(result)
                     self._set_idle()
-                    reduction = 0
-                    if result.block_lines_before:
-                        reduction = round((1 - result.block_lines_after / result.block_lines_before) * 100)
-                    self._log(
-                        f"完成：{result.layout} {result.scale}，块线减少 {reduction}% ，审计错误 {result.audit_errors}"
+                    self._set_state("已完成", SUCCESS, SUCCESS_SOFT)
+                    self.result_title_var.set(f"{result.layout}  {result.scale}")
+                    self.result_detail_var.set(
+                        f"{result.material_count} 种材质，{result.material_hatches} 个色块，"
+                        f"{result.block_references} 个块参照，审计错误 {result.audit_errors}"
                     )
-                    messagebox.showinfo(
-                        "导出完成",
-                        f"文件：{result.dxf.name}\n图幅：{result.layout}  {result.scale}\n审计错误：{result.audit_errors}",
-                        parent=self.root,
-                    )
+                    self.open_file_button.configure(state="normal")
+                    self.tabs.set("当前任务")
+                    self._log(f"完成：{result.dxf}")
                 elif event == "cancelled":
-                    self.progress_text_var.set("已取消")
+                    self.phase_var.set("已取消")
                     self._set_idle()
+                    self._set_state("已取消", MUTED, SURFACE_ALT)
+                    self.result_title_var.set("任务已取消")
+                    self.result_detail_var.set(str(payload))
                     self._log(str(payload))
                 elif event == "error":
                     message, details = payload  # type: ignore[misc]
-                    self.progress_text_var.set("导出失败")
+                    self.phase_var.set("导出失败")
                     self._set_idle()
+                    self._set_state("失败", ERROR, ERROR_SOFT)
+                    self.result_title_var.set("未能生成 CAD")
+                    self.result_detail_var.set(str(message))
                     self._log(f"错误：{message}")
                     self._log(str(details))
-                    messagebox.showerror("导出失败", str(message), parent=self.root)
+                    if not self.log_visible:
+                        self._toggle_log()
                 elif event == "status":
                     health, cad_running = payload  # type: ignore[misc]
                     self.status_refreshing = False
@@ -380,10 +667,14 @@ class SU2CADApp:
         self.root.after(100, self._drain_events)
 
     def _refresh_status(self) -> None:
-        if not self.status_refreshing:
-            self.status_refreshing = True
-            threading.Thread(target=self._status_worker, daemon=True).start()
+        self._refresh_status_now()
         self.root.after(4000, self._refresh_status)
+
+    def _refresh_status_now(self) -> None:
+        if self.status_refreshing:
+            return
+        self.status_refreshing = True
+        threading.Thread(target=self._status_worker, daemon=True).start()
 
     def _status_worker(self) -> None:
         try:
@@ -393,36 +684,87 @@ class SU2CADApp:
         self.events.put(("status", (health, cad_is_running())))
 
     def _apply_status(self, health: dict | None, cad_running: bool) -> None:
-        connected = bool(health and health.get("ok") and health.get("running"))
-        self.sketchup_status.configure(
-            text="已连接" if connected else "未连接",
-            style="Connected.TLabel" if connected else "Disconnected.TLabel",
-        )
-        self.cad_status.configure(
-            text="CAD 已运行" if cad_running else "CAD 未运行",
-            style="Connected.TLabel" if cad_running else "Disconnected.TLabel",
-        )
-        if connected and health:
+        self.sketchup_connected = bool(health and health.get("ok") and health.get("running"))
+        if self.sketchup_connected and health:
+            self.sketchup_chip.configure(text="SketchUp 已连接", fg_color=SUCCESS_SOFT, text_color=SUCCESS)
             title = str(health.get("title") or "未命名模型")
             version = str(health.get("sketchup_version") or "")
-            self.model_var.set(f"{title}  |  SketchUp {version}")
+            self.model_var.set(f"{title}  ·  SketchUp {version}")
         else:
+            self.sketchup_chip.configure(text="SketchUp 未连接", fg_color=ERROR_SOFT, text_color=ERROR)
             self.model_var.set("打开 SketchUp 并启动 SU2CAD / Codex Bridge")
+        self.cad_chip.configure(
+            text="CAD 已运行" if cad_running else "CAD 未运行",
+            fg_color=SUCCESS_SOFT if cad_running else WARNING_SOFT,
+            text_color=SUCCESS if cad_running else WARNING,
+        )
+        if not (self.export_thread and self.export_thread.is_alive()):
+            self.export_button.configure(state="normal" if self.sketchup_connected else "disabled")
 
-    def _selected_path(self) -> Path | None:
-        selected = self.recent_tree.selection()
-        if selected:
-            return Path(selected[0])
-        if self.last_result:
-            return self.last_result.dxf
-        return None
+    def _add_recent(self, result: ExportResult) -> None:
+        record = {
+            "path": str(result.dxf),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "layout": result.layout,
+            "size": f"{result.dxf.stat().st_size / 1024 / 1024:.1f} MB",
+        }
+        recent = [item for item in self.saved.get("recent", []) if item.get("path") != str(result.dxf)]
+        self.saved["recent"] = [record, *recent][:10]
+        self._save_settings()
+        self._rebuild_recent()
 
-    def _open_selected(self) -> None:
-        path = self._selected_path()
-        if not path or not path.exists():
-            messagebox.showinfo("最近输出", "请选择一个仍然存在的输出文件", parent=self.root)
+    def _rebuild_recent(self) -> None:
+        for widget in self.recent_frame.winfo_children():
+            widget.destroy()
+        recent = self.saved.get("recent", [])
+        if not recent:
+            ctk.CTkLabel(
+                self.recent_frame,
+                text="还没有输出记录",
+                text_color=MUTED,
+                font=ctk.CTkFont("Microsoft YaHei UI", 12),
+            ).grid(row=0, column=0, padx=12, pady=36)
+            return
+        for index, item in enumerate(recent):
+            path = Path(item.get("path", ""))
+            row = ctk.CTkFrame(self.recent_frame, fg_color=SURFACE_ALT, corner_radius=8)
+            row.grid(row=index, column=0, padx=4, pady=5, sticky="ew")
+            row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                row,
+                text=path.name,
+                text_color=TEXT,
+                font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+                anchor="w",
+            ).grid(row=0, column=0, padx=14, pady=(10, 2), sticky="ew")
+            ctk.CTkLabel(
+                row,
+                text=f"{item.get('time', '')}  ·  {item.get('layout', '')}  ·  {item.get('size', '')}",
+                text_color=MUTED,
+                font=ctk.CTkFont("Microsoft YaHei UI", 10),
+                anchor="w",
+            ).grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
+            ctk.CTkButton(
+                row,
+                text="打开",
+                width=64,
+                height=30,
+                fg_color=SURFACE,
+                hover_color=BORDER,
+                text_color=TEXT,
+                command=lambda selected=path: self._open_path(selected),
+            ).grid(row=0, column=1, rowspan=2, padx=12, pady=10)
+
+    def _open_path(self, path: Path) -> None:
+        if not path.exists():
+            self._set_state("文件缺失", ERROR, ERROR_SOFT)
+            self.result_detail_var.set(f"找不到文件：{path}")
             return
         os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_last_result(self) -> None:
+        if self.last_result:
+            self._open_path(self.last_result.dxf)
 
     def _open_output_folder(self) -> None:
         path = Path(self.output_var.get()).expanduser()
@@ -431,23 +773,25 @@ class SU2CADApp:
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.configure(state="normal")
         self.log_text.insert("end", f"[{timestamp}] {message}\n")
         self.log_text.see("end")
-        self.log_text.configure(state="disabled")
 
     def _on_close(self) -> None:
         if self.export_thread and self.export_thread.is_alive():
             if not messagebox.askyesno("退出 SU2CAD", "导出仍在进行，确定退出吗？", parent=self.root):
                 return
             self.cancel_event.set()
-        self._save_settings()
-        self.root.destroy()
+        try:
+            self._save_settings()
+        finally:
+            self.root.destroy()
 
 
 def main() -> None:
     enable_high_dpi()
-    root = tk.Tk()
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
+    root = ctk.CTk(fg_color=BG)
     SU2CADApp(root)
     root.mainloop()
 

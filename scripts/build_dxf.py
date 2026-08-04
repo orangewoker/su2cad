@@ -20,6 +20,13 @@ import ezdxf  # noqa: E402
 import numpy as np  # noqa: E402
 from ezdxf import units  # noqa: E402
 from ezdxf.enums import TextEntityAlignment  # noqa: E402
+from ezdxf.lldxf import const  # noqa: E402
+from shapely import make_valid  # noqa: E402
+from shapely.errors import GEOSException  # noqa: E402
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon  # noqa: E402
+from shapely.geometry.base import BaseGeometry  # noqa: E402
+from shapely.ops import unary_union  # noqa: E402
+from shapely.strtree import STRtree  # noqa: E402
 
 
 STANDARD_SCALES = [1, 2, 5, 10, 20, 25, 50, 75, 100, 125, 150, 200, 250, 500, 750, 1000, 1500, 2000, 2500, 5000]
@@ -33,6 +40,12 @@ PAPER_SIZES = {
 INVALID_LAYER_CHARS = re.compile(r"[<>/\\\":;?*|=`,]")
 DEFAULT_MAX_BLOCK_LINES = 2500
 PLANT_BLOCK_LAYER = "SU-PLANTS-BLOCKS"
+DEPTH_TOLERANCE_MM = 0.5
+HATCH_SIMPLIFY_MM = 0.2
+PLANT_HATCH_SIMPLIFY_MM = 2.0
+MIN_HATCH_AREA_MM2 = 1.0
+MIN_PLANT_HATCH_AREA_MM2 = 25.0
+MAX_HATCH_VERTICES_PER_GROUP = 50_000
 PLANT_TERMS = (
     "plant", "tree", "grass", "garden", "gardem", "folha", "buqu",
     "植物", "绿萝", "花", "树", "草", "灌木", "乔木", "盆栽",
@@ -44,6 +57,18 @@ class Segment:
     start: tuple[float, float]
     end: tuple[float, float]
     layer: str
+
+
+@dataclass(frozen=True)
+class ProjectedFill:
+    geometry: BaseGeometry
+    depth: float
+    depth_plane: tuple[float, float, float]
+    paint: bool
+    layer: str
+    color: tuple[int, int, int] | None
+    alpha: float
+    material_name: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -190,7 +215,7 @@ def add_curve(layout, raw: dict, layer: str) -> list[tuple[float, float]]:
     points = [point2(point) for point in raw.get("points", [])]
     if len(points) < 2:
         return []
-    closed = bool(raw.get("closed"))
+    closed = bool(raw.get("closed")) and not bool(raw.get("partiallyOccluded"))
     is_arc_curve = raw.get("curveType") == "ArcCurve"
     unique_count = len(points) - 1 if closed and math.dist(points[0], points[-1]) < 0.01 else len(points)
     circle = fit_circle(points) if is_arc_curve and unique_count >= (8 if closed else 4) else None
@@ -237,6 +262,391 @@ def add_curve(layout, raw: dict, layer: str) -> list[tuple[float, float]]:
     else:
         layout.add_lwpolyline(points, dxfattribs={"layer": layer})
     return points
+
+
+def iter_polygon_parts(geometry, min_area: float = MIN_HATCH_AREA_MM2) -> Iterable[Polygon]:
+    if isinstance(geometry, Polygon):
+        if not geometry.is_empty and geometry.area >= min_area:
+            yield geometry
+    elif isinstance(geometry, MultiPolygon):
+        for part in geometry.geoms:
+            yield from iter_polygon_parts(part, min_area)
+    elif isinstance(geometry, GeometryCollection):
+        for part in geometry.geoms:
+            yield from iter_polygon_parts(part, min_area)
+
+
+def fill_polygon(raw: dict, offset: tuple[float, float]) -> Polygon | MultiPolygon | None:
+    outer_loops: list[list[tuple[float, float]]] = []
+    holes: list[list[tuple[float, float]]] = []
+    for loop in raw.get("loops", []):
+        points = [
+            (float(point[0]) + offset[0], float(point[1]) + offset[1])
+            for point in loop.get("points", [])
+        ]
+        if len(points) < 3:
+            continue
+        if loop.get("outer"):
+            outer_loops.append(points)
+        else:
+            holes.append(points)
+    if not outer_loops:
+        return None
+
+    polygons = []
+    for outer in outer_loops:
+        outer_polygon = Polygon(outer)
+        owned_holes = [hole for hole in holes if outer_polygon.covers(Polygon(hole).representative_point())]
+        polygon = Polygon(outer, owned_holes)
+        if not polygon.is_valid:
+            polygon = make_valid(polygon)
+        polygons.extend(iter_polygon_parts(polygon))
+    if not polygons:
+        return None
+    geometry = unary_union(polygons)
+    if geometry.is_empty:
+        return None
+    return geometry
+
+
+def projected_depth_plane(
+    raw: dict,
+    offset: tuple[float, float],
+    depth_offset: float,
+) -> tuple[float, float, float]:
+    points = []
+    for loop in raw.get("loops", []):
+        for point in loop.get("points", []):
+            if len(point) >= 3:
+                points.append(
+                    (
+                        float(point[0]) + offset[0],
+                        float(point[1]) + offset[1],
+                        float(point[2]) + depth_offset,
+                    )
+                )
+    fallback = float(raw.get("depth", 0.0)) + depth_offset
+    if len(points) < 3:
+        return 0.0, 0.0, fallback
+
+    matrix = np.asarray([[x, y, 1.0] for x, y, _depth in points], dtype=float)
+    depths = np.asarray([depth for _x, _y, depth in points], dtype=float)
+    coefficients, _residuals, rank, _singular = np.linalg.lstsq(matrix, depths, rcond=None)
+    if rank < 3 or not np.all(np.isfinite(coefficients)):
+        return 0.0, 0.0, float(np.mean(depths))
+    return tuple(float(value) for value in coefficients)
+
+
+def raw_block_is_plant(raw_block: dict) -> bool:
+    return (
+        is_plant_name(raw_block.get("sourceName", ""))
+        or any(is_plant_name(raw.get("layer", "")) for raw in raw_block.get("lines", []))
+        or any(is_plant_name(raw.get("layer", "")) for raw in raw_block.get("curves", []))
+        or any(is_plant_name(raw.get("sourceLayer", "")) for raw in raw_block.get("fills", []))
+    )
+
+
+def expanded_fills(payload: dict) -> list[ProjectedFill]:
+    records: list[ProjectedFill] = []
+
+    def append(raw: dict, offset: tuple[float, float], depth_offset: float, plant: bool = False) -> None:
+        try:
+            geometry = fill_polygon(raw, offset)
+            if geometry is None:
+                return
+            color_data = raw.get("color")
+            color = (
+                tuple(max(0, min(255, int(value))) for value in color_data[:3])
+                if color_data and len(color_data) >= 3
+                else None
+            )
+            depth = float(raw.get("depth", 0.0)) + depth_offset
+            records.append(
+                ProjectedFill(
+                    geometry=geometry,
+                    depth=depth,
+                    depth_plane=projected_depth_plane(raw, offset, depth_offset),
+                    paint=bool(raw.get("paint", color is not None)),
+                    layer=(
+                        PLANT_BLOCK_LAYER
+                        if plant or is_plant_name(raw.get("sourceLayer", ""))
+                        else clean_layer(raw.get("layer", "MATERIAL"))
+                    ),
+                    color=color,
+                    alpha=max(0.0, min(1.0, float(raw.get("alpha", 1.0)))),
+                    material_name=str(raw.get("materialName") or ""),
+                )
+            )
+        except (GEOSException, ValueError, TypeError):
+            return
+
+    for raw in payload.get("fills", []):
+        append(raw, (0.0, 0.0), 0.0)
+
+    raw_blocks = {str(block["name"]): block for block in payload.get("blocks", [])}
+    for reference in payload.get("blockReferences", []):
+        block_name = str(reference.get("block", ""))
+        raw_block = raw_blocks.get(block_name, {})
+        offset = point2(reference.get("insert", (0.0, 0.0)))
+        depth_offset = float(reference.get("depth", 0.0))
+        plant = (
+            raw_block_is_plant(raw_block)
+            or is_plant_name(reference.get("layer", ""))
+            or is_plant_name(reference.get("sourceName", ""))
+        )
+        for raw in raw_block.get("fills", []):
+            append(raw, offset, depth_offset, plant)
+    return records
+
+
+def clip_ring_to_positive_half_plane(
+    points: list[tuple[float, float]],
+    a: float,
+    b: float,
+    c: float,
+) -> list[tuple[float, float]]:
+    if not points:
+        return []
+
+    output = []
+    previous = points[-1]
+    previous_value = (a * previous[0]) + (b * previous[1]) + c
+    previous_inside = previous_value > 0.0
+    for current in points:
+        current_value = (a * current[0]) + (b * current[1]) + c
+        current_inside = current_value > 0.0
+        if current_inside != previous_inside:
+            denominator = previous_value - current_value
+            ratio = 0.0 if abs(denominator) < 1.0e-12 else previous_value / denominator
+            output.append(
+                (
+                    previous[0] + ((current[0] - previous[0]) * ratio),
+                    previous[1] + ((current[1] - previous[1]) * ratio),
+                )
+            )
+        if current_inside:
+            output.append(current)
+        previous = current
+        previous_value = current_value
+        previous_inside = current_inside
+    return output
+
+
+def closer_overlap(target: ProjectedFill, candidate: ProjectedFill) -> BaseGeometry:
+    overlap = target.geometry.intersection(candidate.geometry)
+    if overlap.is_empty or overlap.area < MIN_HATCH_AREA_MM2:
+        return GeometryCollection()
+
+    a = candidate.depth_plane[0] - target.depth_plane[0]
+    b = candidate.depth_plane[1] - target.depth_plane[1]
+    c = candidate.depth_plane[2] - target.depth_plane[2] - DEPTH_TOLERANCE_MM
+    if abs(a) < 1.0e-12 and abs(b) < 1.0e-12:
+        return overlap if c > 0.0 else GeometryCollection()
+
+    min_x, min_y, max_x, max_y = overlap.bounds
+    margin = max(max_x - min_x, max_y - min_y, 1.0) + 1.0
+    rectangle = [
+        (min_x - margin, min_y - margin),
+        (max_x + margin, min_y - margin),
+        (max_x + margin, max_y + margin),
+        (min_x - margin, max_y + margin),
+    ]
+    half_plane = clip_ring_to_positive_half_plane(rectangle, a, b, c)
+    if len(half_plane) < 3:
+        return GeometryCollection()
+    return overlap.intersection(Polygon(half_plane))
+
+
+def visible_material_geometry(records: list[ProjectedFill]) -> tuple[list[ProjectedFill], int]:
+    opaque = [
+        (index, record)
+        for index, record in enumerate(records)
+        if not record.paint or record.alpha >= 0.98
+    ]
+    if not opaque:
+        return [record for record in records if record.paint and record.color and record.alpha > 0.01], 0
+
+    tree = STRtree([record.geometry for _index, record in opaque])
+    visible_records = []
+    for index, record in enumerate(records):
+        if not record.paint or not record.color or record.alpha <= 0.01:
+            continue
+        masks = []
+        for tree_index in tree.query(record.geometry, predicate="intersects"):
+            candidate_index, candidate = opaque[int(tree_index)]
+            if candidate_index == index:
+                continue
+            mask = closer_overlap(record, candidate)
+            if not mask.is_empty:
+                masks.append(mask)
+        visible = record.geometry
+        if masks:
+            visible = visible.difference(unary_union(masks))
+        if not visible.is_empty and visible.area >= MIN_HATCH_AREA_MM2:
+            visible_records.append(
+                ProjectedFill(
+                    geometry=visible,
+                    depth=record.depth,
+                    depth_plane=record.depth_plane,
+                    paint=True,
+                    layer=record.layer,
+                    color=record.color,
+                    alpha=record.alpha,
+                    material_name=record.material_name,
+                )
+            )
+    return visible_records, len(opaque)
+
+
+def geometry_vertex_count(geometry: BaseGeometry, min_area: float) -> int:
+    return sum(
+        len(polygon.exterior.coords) + sum(len(interior.coords) for interior in polygon.interiors)
+        for polygon in iter_polygon_parts(geometry, min_area)
+    )
+
+
+def decimate_polygon(polygon: Polygon, budget: int) -> Polygon | None:
+    if budget < 4:
+        return None
+
+    exterior = list(polygon.exterior.coords)[:-1]
+    if len(exterior) + 1 > budget:
+        target = budget - 1
+        indexes = np.linspace(0, len(exterior) - 1, num=target, dtype=int)
+        exterior = [exterior[int(index)] for index in indexes]
+        holes: list[list[tuple[float, float]]] = []
+    else:
+        remaining = budget - len(exterior) - 1
+        holes = []
+        interiors = sorted(
+            (list(interior.coords)[:-1] for interior in polygon.interiors),
+            key=lambda ring: Polygon(ring).area,
+            reverse=True,
+        )
+        for ring in interiors:
+            if len(ring) + 1 <= remaining:
+                holes.append(ring)
+                remaining -= len(ring) + 1
+
+    candidate: BaseGeometry = Polygon(exterior, holes)
+    if not candidate.is_valid:
+        candidate = make_valid(candidate)
+    parts = sorted(iter_polygon_parts(candidate, 0.0), key=lambda item: item.area, reverse=True)
+    if not parts:
+        return None
+    result = parts[0]
+    if geometry_vertex_count(result, 0.0) > budget:
+        bare_exterior = list(result.exterior.coords)[:-1]
+        target = max(3, budget - 1)
+        indexes = np.linspace(0, len(bare_exterior) - 1, num=min(target, len(bare_exterior)), dtype=int)
+        result = Polygon([bare_exterior[int(index)] for index in indexes])
+    return result if result.is_valid and not result.is_empty else None
+
+
+def enforce_geometry_vertex_budget(geometry: BaseGeometry, min_area: float) -> BaseGeometry:
+    selected = []
+    remaining = MAX_HATCH_VERTICES_PER_GROUP
+    for polygon in sorted(iter_polygon_parts(geometry, min_area), key=lambda item: item.area, reverse=True):
+        if remaining < 4:
+            break
+        candidate = decimate_polygon(polygon, remaining)
+        if candidate is None:
+            continue
+        vertices = geometry_vertex_count(candidate, 0.0)
+        if vertices > remaining:
+            continue
+        selected.append(candidate)
+        remaining -= vertices
+    return GeometryCollection(selected)
+
+
+def compact_hatch_geometry(geometry: BaseGeometry, plant: bool) -> BaseGeometry:
+    tolerance = PLANT_HATCH_SIMPLIFY_MM if plant else HATCH_SIMPLIFY_MM
+    min_area = MIN_PLANT_HATCH_AREA_MM2 if plant else MIN_HATCH_AREA_MM2
+    compacted = geometry.simplify(tolerance, preserve_topology=True)
+    parts = list(iter_polygon_parts(compacted, min_area))
+    if not parts:
+        return GeometryCollection()
+    compacted = unary_union(parts)
+    for _attempt in range(24):
+        if geometry_vertex_count(compacted, min_area) <= MAX_HATCH_VERTICES_PER_GROUP:
+            break
+        tolerance *= 2.0
+        compacted = compacted.simplify(tolerance, preserve_topology=True)
+    if geometry_vertex_count(compacted, min_area) > MAX_HATCH_VERTICES_PER_GROUP:
+        compacted = enforce_geometry_vertex_budget(compacted, min_area)
+    return compacted
+
+
+def add_hatch_group(
+    layout,
+    layer: str,
+    color: tuple[int, int, int],
+    alpha: float,
+    geometries: list[BaseGeometry],
+) -> tuple[list[tuple[float, float]], int]:
+    merged = compact_hatch_geometry(unary_union(geometries), layer == PLANT_BLOCK_LAYER)
+    min_area = MIN_PLANT_HATCH_AREA_MM2 if layer == PLANT_BLOCK_LAYER else MIN_HATCH_AREA_MM2
+    polygons = list(iter_polygon_parts(merged, min_area))
+    extent_points: list[tuple[float, float]] = []
+    hatch_count = 0
+    for chunk_start in range(0, len(polygons), 250):
+        chunk = polygons[chunk_start:chunk_start + 250]
+        hatch = layout.add_hatch(dxfattribs={"layer": layer})
+        hatch.set_solid_fill(color=7, style=const.HATCH_STYLE_NESTED, rgb=color)
+        if alpha < 0.999:
+            hatch.transparency = 1.0 - alpha
+        for polygon in chunk:
+            exterior = list(polygon.exterior.coords)[:-1]
+            if len(exterior) < 3:
+                continue
+            hatch.paths.add_polyline_path(
+                exterior,
+                is_closed=True,
+                flags=const.BOUNDARY_PATH_EXTERNAL,
+            )
+            extent_points.extend(exterior)
+            for interior in polygon.interiors:
+                hole = list(interior.coords)[:-1]
+                if len(hole) >= 3:
+                    hatch.paths.add_polyline_path(
+                        hole,
+                        is_closed=True,
+                        flags=const.BOUNDARY_PATH_DEFAULT,
+                    )
+        hatch_count += 1
+    return extent_points, hatch_count
+
+
+def add_material_hatches(layout, records: list[ProjectedFill]) -> tuple[list[tuple[float, float]], int, int, int]:
+    if not records:
+        return [], 0, 0, 0
+
+    visible_records, occluder_count = visible_material_geometry(records)
+    opaque_groups: dict[tuple, list[BaseGeometry]] = {}
+    transparent_groups: dict[tuple, list[BaseGeometry]] = {}
+    material_keys = set()
+    for record in visible_records:
+        material_key = (record.layer, record.color, round(record.alpha, 3), record.material_name)
+        material_keys.add(material_key)
+        if record.alpha >= 0.98:
+            opaque_groups.setdefault(material_key, []).append(record.geometry)
+        else:
+            depth_bucket = round(record.depth / DEPTH_TOLERANCE_MM)
+            transparent_groups.setdefault((*material_key, depth_bucket), []).append(record.geometry)
+
+    extent_points: list[tuple[float, float]] = []
+    hatch_count = 0
+    render_groups = [(*key, geometries) for key, geometries in sorted(opaque_groups.items(), key=lambda item: str(item[0]))]
+    render_groups.extend(
+        (*key[:4], geometries)
+        for key, geometries in sorted(transparent_groups.items(), key=lambda item: item[0][4])
+    )
+    for layer, color, alpha, _material_name, geometries in render_groups:
+        points, count = add_hatch_group(layout, layer, color, alpha, geometries)
+        extent_points.extend(points)
+        hatch_count += count
+    return extent_points, hatch_count, len(material_keys), occluder_count
 
 
 def select_scale(width: float, height: float, viewport_size: tuple[float, float]) -> int:
@@ -440,17 +850,19 @@ def build(
 
     segments = [segment for segment in (normalize_segment(raw) for raw in payload.get("lines", [])) if segment]
     merged = merge_collinear(segments)
+    fill_records = expanded_fills(payload)
     used_layers = {segment.layer for segment in merged}
     used_layers.update(clean_layer(raw.get("layer", "Untagged")) for raw in payload.get("curves", []))
     for block in payload.get("blocks", []):
         used_layers.update(clean_layer(raw.get("layer", "Untagged")) for raw in block.get("lines", []))
         used_layers.update(clean_layer(raw.get("layer", "Untagged")) for raw in block.get("curves", []))
+    used_layers.update(record.layer for record in fill_records if record.paint)
     used_layers.update(clean_layer(raw.get("layer", "Untagged")) for raw in payload.get("blockReferences", []))
     for name in sorted(used_layers):
         if name not in doc.layers:
             doc.layers.add(name, color=7, lineweight=18)
 
-    extent_points: list[tuple[float, float]] = []
+    extent_points, material_hatches, material_count, occluder_faces = add_material_hatches(msp, fill_records)
     for segment in merged:
         msp.add_line(segment.start, segment.end, dxfattribs={"layer": segment.layer})
         extent_points.extend((segment.start, segment.end))
@@ -479,11 +891,13 @@ def build(
             block.add_line(segment.start, segment.end, dxfattribs={"layer": segment.layer})
         for raw_curve in raw_block.get("curves", []):
             points.extend(add_curve(block, raw_curve, clean_layer(raw_curve.get("layer", "Untagged"))))
-        if (
-            is_plant_name(raw_block.get("sourceName", ""))
-            or any(is_plant_name(raw.get("layer", "")) for raw in raw_block.get("lines", []))
-            or any(is_plant_name(raw.get("layer", "")) for raw in raw_block.get("curves", []))
-        ):
+        points.extend(
+            point2(point)
+            for raw_fill in raw_block.get("fills", [])
+            for loop in raw_fill.get("loops", [])
+            for point in loop.get("points", [])
+        )
+        if raw_block_is_plant(raw_block):
             plant_blocks.add(name)
         block_points[name] = points
 
@@ -538,6 +952,10 @@ def build(
             or is_plant_name(reference.get("layer", ""))
             or is_plant_name(reference.get("sourceName", ""))
         ),
+        "materialFaces": len(fill_records),
+        "materialHatches": material_hatches,
+        "materialCount": material_count,
+        "occluderFaces": occluder_faces,
         "scale": f"1:{scale}",
         "paperSize": paper_config["name"],
         "paperOrientation": paper_config["orientation"],

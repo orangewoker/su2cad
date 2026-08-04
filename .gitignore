@@ -9,4 +9,5 @@ Thumbs.db
 build/
 dist/
 release/
+artifacts/
 *.spec.bak

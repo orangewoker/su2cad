@@ -9,21 +9,27 @@ module SketchupCurrentViewCad
   VISIBILITY_TOLERANCE_INCH = 2.0 / MM_PER_INCH
   SECTION_TOLERANCE_INCH = 0.5 / MM_PER_INCH
   MIN_FRAGMENT_INCH = 2.0 / MM_PER_INCH
+  MIN_FILL_AREA_MM2 = 4.0
+  MATERIAL_PREFILTER_AREA_MM2 = 250_000.0
+  VISIBILITY_SAMPLE_MM = 50.0
+  MAX_VISIBILITY_INTERVALS = 4096
   MAX_CLIP_DEPTH = 7
 
   class << self
-    def export(output_path, occlusion: true, strict_section_occlusion: true)
+    def export(output_path, occlusion: true, strict_section_occlusion: true, materials: true)
       model = Sketchup.active_model
       raise 'No active SketchUp model' unless model
 
       camera = model.active_view.camera
       basis = camera_basis(camera)
+      viewport = viewport_bounds(model.active_view, camera)
       section = active_section(model, camera)
       effective_occlusion = section ? strict_section_occlusion : occlusion
       diagonal = [model.bounds.diagonal.to_f, 1000.0].max
       context = {
         model: model,
         basis: basis,
+        viewport: viewport,
         section: section,
         ray_distance: diagonal * 3.0,
         occlusion: effective_occlusion,
@@ -31,20 +37,30 @@ module SketchupCurrentViewCad
         processed_curves: {},
         lines: [],
         curves: [],
+        fills: [],
         blocks: [],
         block_references: [],
         block_hashes: {},
         block_mode: true,
+        emit_materials: materials,
+        material_prefilter: false,
         skipped_hidden: 0,
         skipped_occluded: 0,
+        skipped_material_faces: 0,
+        material_faces: 0,
+        ray_errors: 0,
         section_lines: 0,
         silhouette_edges: 0
       }
 
-      walk_entities(model.entities, Geom::Transformation.new, nil, context)
+      walk_entities(model.entities, Geom::Transformation.new, nil, nil, context)
+      if context[:ray_errors].positive?
+        raise "SketchUp visibility ray testing failed #{context[:ray_errors]} times"
+      end
+
       payload = {
         format: 'sketchup-current-view-linework',
-        version: 1,
+        version: 2,
         unit: 'mm',
         model: {
           title: model.title.to_s,
@@ -57,7 +73,11 @@ module SketchupCurrentViewCad
           up: vector_array(camera.up),
           eyeMm: point_array(camera.eye),
           targetMm: point_array(camera.target),
-          projection: 'orthographic'
+          projection: 'orthographic',
+          viewportMm: [
+            (viewport[:max_x] - viewport[:min_x]).round(4),
+            (viewport[:max_y] - viewport[:min_y]).round(4)
+          ]
         },
         section: section && {
           name: section[:name],
@@ -65,11 +85,15 @@ module SketchupCurrentViewCad
         },
         lines: context[:lines],
         curves: context[:curves],
+        fills: context[:fills],
         blocks: context[:blocks],
         blockReferences: context[:block_references],
         stats: {
           lineFragments: context[:lines].length,
           curves: context[:curves].length,
+          fills: context[:fills].length,
+          materialFaces: context[:material_faces],
+          skippedMaterialFaces: context[:skipped_material_faces],
           skippedHidden: context[:skipped_hidden],
           skippedOccluded: context[:skipped_occluded],
           sectionLines: context[:section_lines],
@@ -78,7 +102,9 @@ module SketchupCurrentViewCad
           blockReferences: context[:block_references].length,
           occlusion: effective_occlusion,
           requestedOcclusion: occlusion,
-          strictSectionOcclusion: strict_section_occlusion
+          strictSectionOcclusion: strict_section_occlusion,
+          materials: materials,
+          rayErrors: context[:ray_errors]
         }
       }
 
@@ -93,7 +119,7 @@ module SketchupCurrentViewCad
 
     private
 
-    def walk_entities(entities, transform, outer_tag, context)
+    def walk_entities(entities, transform, outer_tag, outer_material, context)
       entities.each do |entity|
         unless entity_visible?(entity)
           context[:skipped_hidden] += 1
@@ -103,13 +129,20 @@ module SketchupCurrentViewCad
         case entity
         when Sketchup::Group, Sketchup::ComponentInstance
           child_tag = outer_tag || tag_name(entity)
+          child_material = entity.respond_to?(:material) && entity.material ? entity.material : outer_material
           world_transform = transform * entity.transformation
-          emitted = context[:block_mode] && block_candidate?(entity, world_transform, context) &&
-                    emit_instance_block(entity, world_transform, child_tag, context)
-          walk_entities(entity.definition.entities, world_transform, child_tag, context) unless emitted
+          block_result = if context[:block_mode] && block_candidate?(entity, world_transform, context)
+                           emit_instance_block(entity, world_transform, child_tag, child_material, context)
+                         else
+                           :fallback
+                         end
+          if block_result == :fallback
+            walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
+          end
         when Sketchup::Edge
           emit_edge(entity, entities, transform, outer_tag, context)
         when Sketchup::Face
+          emit_face_material(entity, transform, outer_tag, outer_material, context) if context[:emit_materials]
           emit_section_intersections(entity, transform, context) if context[:section]
         end
       end
@@ -125,35 +158,45 @@ module SketchupCurrentViewCad
       false
     end
 
-    def emit_instance_block(instance, world_transform, outer_tag, context)
-      return false unless instance_visible_for_block?(instance, world_transform, context)
-
+    def emit_instance_block(instance, world_transform, outer_tag, outer_material, context)
       block_context = {
         model: context[:model],
         basis: context[:basis],
+        viewport: context[:viewport],
         section: context[:section],
         ray_distance: context[:ray_distance],
-        occlusion: false,
+        occlusion: context[:occlusion],
         visibility_cache: context[:visibility_cache],
         processed_curves: {},
         lines: [],
         curves: [],
+        fills: [],
         blocks: [],
         block_references: [],
         block_hashes: {},
         block_mode: false,
+        emit_materials: context[:emit_materials],
+        material_prefilter: true,
         skipped_hidden: 0,
         skipped_occluded: 0,
+        skipped_material_faces: 0,
+        material_faces: 0,
+        ray_errors: 0,
         section_lines: 0,
         silhouette_edges: 0
       }
-      walk_entities(instance.definition.entities, world_transform, outer_tag, block_context)
-      return false if block_context[:lines].empty? && block_context[:curves].empty?
+      walk_entities(instance.definition.entities, world_transform, outer_tag, outer_material, block_context)
+      if block_context[:lines].empty? && block_context[:curves].empty? && block_context[:fills].empty?
+        context[:skipped_occluded] += block_context[:skipped_occluded]
+        context[:skipped_material_faces] += block_context[:skipped_material_faces]
+        context[:ray_errors] += block_context[:ray_errors]
+        return :occluded
+      end
 
-      normalized = normalize_block_geometry(block_context[:lines], block_context[:curves])
-      return false unless normalized
+      normalized = normalize_block_geometry(block_context[:lines], block_context[:curves], block_context[:fills])
+      return :fallback unless normalized
 
-      geometry_hash = block_geometry_hash(normalized[:lines], normalized[:curves])
+      geometry_hash = block_geometry_hash(normalized[:lines], normalized[:curves], normalized[:fills])
       source_name = instance.name.to_s.empty? ? instance.definition.name.to_s : instance.name.to_s
       block_name = context[:block_hashes][geometry_hash]
       unless block_name
@@ -165,55 +208,44 @@ module SketchupCurrentViewCad
           sourceName: source_name,
           definitionId: instance.definition.persistent_id,
           geometryHash: geometry_hash,
-          lines: normalized[:lines],
-          curves: normalized[:curves]
+           lines: normalized[:lines],
+           curves: normalized[:curves],
+           fills: normalized[:fills]
         }
         context[:block_hashes][geometry_hash] = block_name
       end
 
       context[:block_references] << {
         block: block_name,
-        insert: normalized[:insert],
+           insert: normalized[:insert],
+           depth: normalized[:depth],
         layer: "BLOCK_#{source_name}",
         sourceId: instance.persistent_id,
         sourceName: instance.name.to_s.empty? ? instance.definition.name.to_s : instance.name.to_s
       }
       context[:section_lines] += block_context[:section_lines]
       context[:silhouette_edges] += block_context[:silhouette_edges]
-      true
+      context[:skipped_hidden] += block_context[:skipped_hidden]
+      context[:skipped_occluded] += block_context[:skipped_occluded]
+      context[:skipped_material_faces] += block_context[:skipped_material_faces]
+      context[:material_faces] += block_context[:material_faces]
+      context[:ray_errors] += block_context[:ray_errors]
+      :emitted
     rescue StandardError
-      false
+      :fallback
     end
 
-    def instance_visible_for_block?(instance, world_transform, context)
-      points = bounds_corners(instance.definition.bounds).map { |point| point.transform(world_transform) }
-      if context[:section]
-        kept = points.select do |point|
-          plane_distance(point, context[:section][:plane]) * context[:section][:keep_multiplier] >= -SECTION_TOLERANCE_INCH
-        end
-        return false if kept.empty?
-        points = kept
-      end
-      return true if instance.is_a?(Sketchup::ComponentInstance) && !instance.is_a?(Sketchup::Group)
-      return true unless context[:occlusion]
-
-      center = Geom::Point3d.new(
-        points.sum(&:x) / points.length,
-        points.sum(&:y) / points.length,
-        points.sum(&:z) / points.length
-      )
-      visible = (points + [center]).any? { |point| visible_point?(point, context) }
-      visible || instance.definition.entities.length <= 500
-    end
-
-    def normalize_block_geometry(lines, curves)
-      points = lines.flat_map { |line| [line[:start], line[:end]] } + curves.flat_map { |curve| curve[:points] }
+    def normalize_block_geometry(lines, curves, fills)
+      points = lines.flat_map { |line| [line[:start], line[:end]] } +
+               curves.flat_map { |curve| curve[:points] } +
+               fills.flat_map { |fill| fill[:loops].flat_map { |loop| loop[:points] } }
       return nil if points.empty?
 
       min_x = points.map { |point| point[0] }.min
       min_y = points.map { |point| point[1] }.min
+      min_depth = points.map { |point| point[2].to_f }.min
       shift = lambda do |point|
-        [(point[0] - min_x).round(4), (point[1] - min_y).round(4), point[2].to_f.round(4)]
+        [(point[0] - min_x).round(4), (point[1] - min_y).round(4), (point[2].to_f - min_depth).round(4)]
       end
       normalized_lines = lines.map do |line|
         line.merge(start: shift.call(line[:start]), end: shift.call(line[:end]))
@@ -221,17 +253,38 @@ module SketchupCurrentViewCad
       normalized_curves = curves.map do |curve|
         curve.merge(points: curve[:points].map { |point| shift.call(point) })
       end
-      { insert: [min_x.round(4), min_y.round(4)], lines: normalized_lines, curves: normalized_curves }
+      normalized_fills = fills.map do |fill|
+        fill.merge(
+          depth: (fill[:depth].to_f - min_depth).round(4),
+          loops: fill[:loops].map { |loop| loop.merge(points: loop[:points].map { |point| shift.call(point) }) }
+        )
+      end
+      {
+        insert: [min_x.round(4), min_y.round(4)],
+        depth: min_depth.round(4),
+        lines: normalized_lines,
+        curves: normalized_curves,
+        fills: normalized_fills
+      }
     end
 
-    def block_geometry_hash(lines, curves)
+    def block_geometry_hash(lines, curves, fills)
       line_keys = lines.map do |line|
         [line[:layer], [line[:start].first(2), line[:end].first(2)].sort]
       end.sort_by(&:to_s)
       curve_keys = curves.map do |curve|
         [curve[:layer], curve[:curveType], curve[:closed], curve[:points].map { |point| point.first(2) }]
       end.sort_by(&:to_s)
-      Digest::SHA1.hexdigest(JSON.generate([line_keys, curve_keys]))
+      fill_keys = fills.map do |fill|
+        [
+          fill[:layer],
+          fill[:color],
+          fill[:alpha],
+          fill[:depth],
+          fill[:loops].map { |loop| [loop[:outer], loop[:points].map { |point| point.first(3) }] }
+        ]
+      end.sort_by(&:to_s)
+      Digest::SHA1.hexdigest(JSON.generate([line_keys, curve_keys, fill_keys]))
     end
 
     def projected_definition_size(definition, world_transform, basis)
@@ -259,9 +312,17 @@ module SketchupCurrentViewCad
         return if context[:processed_curves][key]
 
         curve_edges = curve.respond_to?(:edges) ? curve.edges : [edge]
-        return unless curve_edges.any? { |item| display_edge?(item, transform, context) }
-
         context[:processed_curves][key] = true
+        visible_curve_edges = curve_edges.select do |item|
+          entity_visible?(item) && display_edge?(item, transform, context)
+        end
+        return if visible_curve_edges.empty?
+
+        if visible_curve_edges.length != curve_edges.length
+          visible_curve_edges.each { |item| emit_straight_edge(item, transform, tag, context) }
+          return
+        end
+
         points = curve.vertices.map { |vertex| vertex.position.transform(transform) }
         closed = curve_closed?(curve)
         curve_type = curve.respond_to?(:typename) ? curve.typename.to_s : curve.class.name.split('::').last
@@ -270,39 +331,55 @@ module SketchupCurrentViewCad
         runs.each { |run| emit_curve(run, closed && runs.length == 1, tag, context, curve_type) }
       else
         return unless display_edge?(edge, transform, context)
+        emit_straight_edge(edge, transform, tag, context)
+      end
+    end
 
-        start_point = edge.start.position.transform(transform)
-        end_point = edge.end.position.transform(transform)
-        section_pair = clip_segment_to_section(start_point, end_point, context[:section])
-        return unless section_pair
+    def emit_straight_edge(edge, transform, tag, context)
+      start_point = edge.start.position.transform(transform)
+      end_point = edge.end.position.transform(transform)
+      section_pair = clip_segment_to_section(start_point, end_point, context[:section])
+      return unless section_pair
 
-        fragments = clip_visible_segment(section_pair[0], section_pair[1], context)
-        if fragments.empty?
-          context[:skipped_occluded] += 1
-          return
-        end
-        fragments.each do |pair|
-          a = project(pair[0], context[:basis])
-          b = project(pair[1], context[:basis])
-          next if distance2(a, b) < 0.01
+      fragments = clip_visible_segment(section_pair[0], section_pair[1], context)
+      if fragments.empty?
+        context[:skipped_occluded] += 1
+        return
+      end
+      fragments.each do |pair|
+        a = project(pair[0], context[:basis])
+        b = project(pair[1], context[:basis])
+        clipped = clip_projected_segment(a, b, context[:viewport])
+        next unless clipped
+        next if distance2(clipped[0], clipped[1]) < 0.01
 
-          context[:lines] << { start: a, end: b, layer: tag }
-        end
+        context[:lines] << { start: clipped[0], end: clipped[1], layer: tag }
       end
     end
 
     def display_edge?(edge, transform, context)
-      return true unless edge.soft? || edge.smooth?
-
       faces = edge.faces.to_a
       return true if faces.length < 2
 
-      dots = faces.map { |face| world_face_normal(face, transform).dot(context[:basis][:forward]) }
+      normals = faces.map { |face| world_face_normal(face, transform) }
+      dots = normals.map { |normal| normal.dot(context[:basis][:forward]) }
       silhouette = dots.min < -1.0e-5 && dots.max > 1.0e-5
       context[:silhouette_edges] += 1 if silhouette
-      silhouette
+      return silhouette if edge.soft? || edge.smooth?
+
+      same_side = dots.all? { |dot| dot >= 0 } || dots.all? { |dot| dot <= 0 }
+      alignment = normals[0].dot(normals[1]).abs
+      same_material = face_material_key(faces[0], dots[0]) == face_material_key(faces[1], dots[1])
+      return false if same_side && same_material && alignment >= Math.cos(15.0 * Math::PI / 180.0)
+
+      true
     rescue StandardError
       false
+    end
+
+    def face_material_key(face, facing_dot)
+      material = facing_dot < 0 ? face.material : (face.back_material || face.material)
+      material && material.persistent_id
     end
 
     def world_face_normal(face, transform)
@@ -310,6 +387,118 @@ module SketchupCurrentViewCad
       normal = vertices[0].vector_to(vertices[1]).cross(vertices[0].vector_to(vertices[2]))
       normal.normalize!
       normal
+    end
+
+    def emit_face_material(face, transform, outer_tag, outer_material, context)
+      normal = world_face_normal(face, transform)
+      facing = normal.dot(context[:basis][:forward])
+      return if facing.abs < 1.0e-6
+
+      material = facing < 0 ? (face.material || outer_material) : (face.back_material || outer_material)
+      alpha = material && material.respond_to?(:alpha) ? material.alpha.to_f : 1.0
+      if alpha <= 0.01
+        context[:skipped_material_faces] += 1
+        return
+      end
+
+      loops = face.loops.filter_map do |loop|
+        world_points = loop.vertices.map { |vertex| vertex.position.transform(transform) }
+        clipped = clip_polygon_to_section(world_points, context[:section])
+        next if clipped.length < 3
+
+        projected = dedupe_adjacent(clipped.map { |point| project(point, context[:basis]) })
+        projected = clip_projected_polygon(projected, context[:viewport])
+        next if projected.length < 3 || polygon_area2(projected).abs < MIN_FILL_AREA_MM2
+
+        { outer: loop.outer?, points: projected }
+      end
+      return if loops.none? { |loop| loop[:outer] }
+
+      projected_area = loops.sum do |loop|
+        area = polygon_area2(loop[:points])
+        loop[:outer] ? area : -area
+      end.abs
+      if context[:material_prefilter] && projected_area < MATERIAL_PREFILTER_AREA_MM2
+        sample_count = projected_area >= 10_000.0 ? 3 : 1
+        samples = face_visibility_samples(face, transform, sample_count, projected_area >= 100_000.0)
+        if context[:occlusion] && samples.none? { |point| visible_point?(point, context) }
+          context[:skipped_material_faces] += 1
+          return
+        end
+      end
+
+      color = material && material.color
+      outer_points = loops.select { |loop| loop[:outer] }.flat_map { |loop| loop[:points] }
+      context[:fills] << {
+        materialName: material && material.display_name.to_s,
+        color: color && [color.red.to_i, color.green.to_i, color.blue.to_i],
+        alpha: alpha.round(4),
+        paint: !material.nil?,
+        layer: material ? "MATERIAL_#{material.display_name}" : 'SUCAD-OCCLUDER',
+        sourceLayer: outer_tag || tag_name(face) || 'Untagged',
+        depth: (outer_points.sum { |point| point[2].to_f } / outer_points.length).round(4),
+        loops: loops
+      }
+      context[:material_faces] += 1
+    rescue StandardError
+      context[:skipped_material_faces] += 1
+    end
+
+    def face_visibility_samples(face, transform, count = 3, include_boundary = false)
+      mesh = face.mesh(0)
+      polygons = mesh.polygons.to_a
+      return face.outer_loop.vertices.first(3).map { |vertex| vertex.position.transform(transform) } if polygons.empty?
+
+      indexes = count <= 1 ? [polygons.length / 2] : [0, polygons.length / 2, polygons.length - 1].uniq
+      centroids = indexes.map do |index|
+        vertices = polygons[index].first(3).map { |vertex_index| mesh.point_at(vertex_index.abs).transform(transform) }
+        Geom::Point3d.new(
+          vertices.sum(&:x) / vertices.length,
+          vertices.sum(&:y) / vertices.length,
+          vertices.sum(&:z) / vertices.length
+        )
+      end
+      return centroids unless include_boundary
+
+      boundary = face.outer_loop.vertices.to_a
+      boundary_indexes = if boundary.length <= 4
+                           (0...boundary.length).to_a
+                         else
+                           [0, boundary.length / 4, boundary.length / 2, (boundary.length * 3) / 4]
+                         end
+      centroids + boundary_indexes.uniq.map { |index| boundary[index].position.transform(transform) }
+    rescue StandardError
+      face.outer_loop.vertices.first(3).map { |vertex| vertex.position.transform(transform) }
+    end
+
+    def clip_polygon_to_section(points, section)
+      return points unless section
+      return [] if points.empty?
+
+      output = []
+      previous = points.last
+      previous_distance = plane_distance(previous, section[:plane]) * section[:keep_multiplier]
+      previous_inside = previous_distance >= -SECTION_TOLERANCE_INCH
+      points.each do |current|
+        current_distance = plane_distance(current, section[:plane]) * section[:keep_multiplier]
+        current_inside = current_distance >= -SECTION_TOLERANCE_INCH
+        if current_inside != previous_inside
+          ratio = previous_distance / (previous_distance - current_distance)
+          output << Geom.linear_combination(1.0 - ratio, previous, ratio, current)
+        end
+        output << current if current_inside
+        previous = current
+        previous_distance = current_distance
+        previous_inside = current_inside
+      end
+      output
+    end
+
+    def polygon_area2(points)
+      points.each_with_index.sum do |point, index|
+        following = points[(index + 1) % points.length]
+        (point[0] * following[1]) - (following[0] * point[1])
+      end.abs * 0.5
     end
 
     def emit_section_intersections(face, transform, context)
@@ -323,7 +512,10 @@ module SketchupCurrentViewCad
 
           a = project(pair[0], context[:basis])
           b = project(pair[1], context[:basis])
-          context[:lines] << { start: a, end: b, layer: 'SUCAD-SECTION', section: true }
+          clipped = clip_projected_segment(a, b, context[:viewport])
+          next unless clipped
+
+          context[:lines] << { start: clipped[0], end: clipped[1], layer: 'SUCAD-SECTION', section: true }
           context[:section_lines] += 1
         end
       end
@@ -393,16 +585,25 @@ module SketchupCurrentViewCad
         return
       end
 
-      runs.each do |run|
+      visibility_preserved = same_world_polyline?(points, runs)
+      projected_source = dedupe_adjacent(points.map { |point| project(point, context[:basis]) })
+      projected_runs = runs.flat_map do |run|
         projected = dedupe_adjacent(run.map { |point| project(point, context[:basis]) })
-        next if projected.length < 2
+        clip_projected_polyline(projected, context[:viewport])
+      end
+      fully_preserved = visibility_preserved && same_projected_polyline?(projected_source, projected_runs)
+
+      projected_runs.each do |run|
+        next if run.length < 2
+
+        run_closed = closed && fully_preserved && distance2(run.first, run.last) < 0.01
 
         context[:curves] << {
-          points: projected,
-          closed: closed && runs.length == 1,
+          points: run,
+          closed: run_closed,
           curveType: curve_type,
           layer: tag,
-          partiallyOccluded: context[:occlusion] && runs.length > 1
+          partiallyOccluded: !fully_preserved
         }
       end
     end
@@ -432,23 +633,168 @@ module SketchupCurrentViewCad
       runs
     end
 
-    def clip_visible_segment(start_point, end_point, context, depth = 0)
+    def same_world_polyline?(source, runs)
+      return false unless runs.length == 1 && source.length == runs[0].length
+
+      source.zip(runs[0]).all? { |expected, actual| expected.distance(actual) < 1.0e-6 }
+    end
+
+    def same_projected_polyline?(source, runs)
+      return false unless runs.length == 1 && source.length == runs[0].length
+
+      source.zip(runs[0]).all? { |expected, actual| distance2(expected, actual) < 0.01 }
+    end
+
+    def clip_projected_polyline(points, viewport)
+      return [] if points.length < 2
+
+      runs = []
+      current = []
+      points.each_cons(2) do |start_point, end_point|
+        pair = clip_projected_segment(start_point, end_point, viewport)
+        if pair
+          if current.empty? || distance2(current.last, pair[0]) <= 0.01
+            current << pair[0] if current.empty?
+            current << pair[1]
+          else
+            runs << dedupe_adjacent(current) if current.length > 1
+            current = [pair[0], pair[1]]
+          end
+        elsif current.length > 1
+          runs << dedupe_adjacent(current)
+          current = []
+        end
+      end
+      runs << dedupe_adjacent(current) if current.length > 1
+      runs.select { |run| run.length > 1 }
+    end
+
+    def clip_projected_segment(start_point, end_point, viewport)
+      return [start_point, end_point] unless viewport
+
+      dx = end_point[0] - start_point[0]
+      dy = end_point[1] - start_point[1]
+      lower = 0.0
+      upper = 1.0
+      checks = [
+        [-dx, start_point[0] - viewport[:min_x]],
+        [dx, viewport[:max_x] - start_point[0]],
+        [-dy, start_point[1] - viewport[:min_y]],
+        [dy, viewport[:max_y] - start_point[1]]
+      ]
+      checks.each do |coefficient, distance|
+        if coefficient.abs < 1.0e-12
+          return nil if distance.negative?
+
+          next
+        end
+
+        ratio = distance / coefficient
+        if coefficient.negative?
+          lower = [lower, ratio].max
+        else
+          upper = [upper, ratio].min
+        end
+        return nil if lower > upper
+      end
+
+      [
+        interpolate_projected(start_point, end_point, lower),
+        interpolate_projected(start_point, end_point, upper)
+      ]
+    end
+
+    def clip_projected_polygon(points, viewport)
+      return points unless viewport
+      return [] if points.empty?
+
+      output = points
+      [
+        [0, viewport[:min_x], true],
+        [0, viewport[:max_x], false],
+        [1, viewport[:min_y], true],
+        [1, viewport[:max_y], false]
+      ].each do |axis, boundary, keep_greater|
+        return [] if output.empty?
+
+        clipped = []
+        previous = output.last
+        previous_inside = keep_greater ? previous[axis] >= boundary : previous[axis] <= boundary
+        output.each do |current|
+          current_inside = keep_greater ? current[axis] >= boundary : current[axis] <= boundary
+          if current_inside != previous_inside
+            denominator = current[axis] - previous[axis]
+            ratio = denominator.abs < 1.0e-12 ? 0.0 : (boundary - previous[axis]) / denominator
+            clipped << interpolate_projected(previous, current, ratio)
+          end
+          clipped << current if current_inside
+          previous = current
+          previous_inside = current_inside
+        end
+        output = dedupe_adjacent(clipped)
+      end
+      output
+    end
+
+    def interpolate_projected(start_point, end_point, ratio)
+      [
+        start_point[0] + ((end_point[0] - start_point[0]) * ratio),
+        start_point[1] + ((end_point[1] - start_point[1]) * ratio),
+        start_point[2].to_f + ((end_point[2].to_f - start_point[2].to_f) * ratio)
+      ].map { |value| value.round(4) }
+    end
+
+    def clip_visible_segment(start_point, end_point, context)
       return [[start_point, end_point]] unless context[:occlusion]
 
-      midpoint = Geom.linear_combination(0.5, start_point, 0.5, end_point)
-      states = [start_point, midpoint, end_point].map { |point| visible_point?(point, context) }
+      length = start_point.distance(end_point)
+      intervals = [[(length * MM_PER_INCH / VISIBILITY_SAMPLE_MM).ceil, 2].max, MAX_VISIBILITY_INTERVALS].min
+      points = (0..intervals).map do |index|
+        ratio = index.to_f / intervals
+        Geom.linear_combination(1.0 - ratio, start_point, ratio, end_point)
+      end
+      states = points.map { |point| visible_point?(point, context) }
       return [[start_point, end_point]] if states.all?
       return [] if states.none?
 
-      if depth >= MAX_CLIP_DEPTH || start_point.distance(end_point) <= MIN_FRAGMENT_INCH
-        output = []
-        output << [start_point, midpoint] if states[0] || states[1]
-        output << [midpoint, end_point] if states[1] || states[2]
-        return output
+      fragments = []
+      points.each_cons(2).with_index do |(a, b), index|
+        state_a = states[index]
+        state_b = states[index + 1]
+        if state_a && state_b
+          fragments << [a, b]
+        elsif state_a != state_b
+          boundary = visibility_boundary(a, b, state_a, context)
+          fragments << (state_a ? [a, boundary] : [boundary, b])
+        end
       end
+      merge_visible_fragments(fragments)
+    end
 
-      clip_visible_segment(start_point, midpoint, context, depth + 1) +
-        clip_visible_segment(midpoint, end_point, context, depth + 1)
+    def visibility_boundary(start_point, end_point, start_visible, context)
+      left = start_point
+      right = end_point
+      MAX_CLIP_DEPTH.times do
+        midpoint = Geom.linear_combination(0.5, left, 0.5, right)
+        if visible_point?(midpoint, context) == start_visible
+          left = midpoint
+        else
+          right = midpoint
+        end
+      end
+      Geom.linear_combination(0.5, left, 0.5, right)
+    end
+
+    def merge_visible_fragments(fragments)
+      fragments.each_with_object([]) do |pair, output|
+        next if pair[0].distance(pair[1]) < MIN_FRAGMENT_INCH
+
+        if !output.empty? && output.last[1].distance(pair[0]) <= MIN_FRAGMENT_INCH
+          output.last[1] = pair[1]
+        else
+          output << pair
+        end
+      end
     end
 
     def visible_point?(point, context)
@@ -464,7 +810,8 @@ module SketchupCurrentViewCad
       visible = hit.nil? || hit[0].distance(point) <= VISIBILITY_TOLERANCE_INCH
       context[:visibility_cache][key] = visible
     rescue StandardError
-      true
+      context[:ray_errors] += 1
+      false
     end
 
     def ray_origin(point, direction, context)
@@ -490,6 +837,31 @@ module SketchupCurrentViewCad
       right.normalize!
       up = right.cross(forward).normalize
       { forward: forward, right: right, up: up, origin: camera.target }
+    end
+
+    def viewport_bounds(view, camera)
+      height_pixels = [view.vpheight.to_f, 1.0].max
+      aspect = [view.vpwidth.to_f / height_pixels, 0.01].max
+      if camera.perspective?
+        target_distance = [camera.eye.distance(camera.target), 1.0e-6].max
+        half_fov = camera.fov.to_f * Math::PI / 360.0
+        if camera.respond_to?(:fov_is_height?) && !camera.fov_is_height?
+          half_width = target_distance * Math.tan(half_fov)
+          half_height = half_width / aspect
+        else
+          half_height = target_distance * Math.tan(half_fov)
+          half_width = half_height * aspect
+        end
+      else
+        half_height = [camera.height.to_f / 2.0, 1.0e-6].max
+        half_width = half_height * aspect
+      end
+      {
+        min_x: -half_width * MM_PER_INCH,
+        max_x: half_width * MM_PER_INCH,
+        min_y: -half_height * MM_PER_INCH,
+        max_y: half_height * MM_PER_INCH
+      }
     end
 
     def active_section(model, camera)

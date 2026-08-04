@@ -5,6 +5,7 @@ param(
     [switch]$DisableOcclusion,
     [switch]$IncludeHiddenSectionEdges,
     [switch]$NoDimensions,
+    [switch]$NoMaterials,
     [ValidateRange(0, 1000000)]
     [int]$MaxBlockLines = 2500,
     [ValidateSet('AUTO', 'A0', 'A1', 'A2', 'A3', 'A4')]
@@ -49,7 +50,8 @@ $rubyPathLiteral = Convert-ToRubyLiteral $rubyExporter
 $jsonPathLiteral = Convert-ToRubyLiteral $jsonPath
 $occlusionLiteral = if ($DisableOcclusion) { 'false' } else { 'true' }
 $strictSectionLiteral = if ($IncludeHiddenSectionEdges) { 'false' } else { 'true' }
-$rubyCode = "load('$rubyPathLiteral'); result = SketchupCurrentViewCad.export('$jsonPathLiteral', occlusion: $occlusionLiteral, strict_section_occlusion: $strictSectionLiteral); puts JSON.generate(result); result"
+$materialsLiteral = if ($NoMaterials) { 'false' } else { 'true' }
+$rubyCode = "load('$rubyPathLiteral'); result = SketchupCurrentViewCad.export('$jsonPathLiteral', occlusion: $occlusionLiteral, strict_section_occlusion: $strictSectionLiteral, materials: $materialsLiteral); puts JSON.generate(result); result"
 $requestBody = @{
     command = 'run_ruby'
     args = @{ code = $rubyCode; file = $rubyExporter }
@@ -114,6 +116,10 @@ if (-not $NoOpen) {
     simplifiedBlocks = $builderResult.simplifiedBlocks
     maxBlockLines = $builderResult.maxBlockLines
     plantBlockReferences = $builderResult.plantBlockReferences
+    materialFaces = $builderResult.materialFaces
+    materialHatches = $builderResult.materialHatches
+    materialCount = $builderResult.materialCount
+    occluderFaces = $builderResult.occluderFaces
     sectionLines = $extractResult.sectionLines
     silhouetteEdges = $extractResult.silhouetteEdges
     skippedOccluded = $extractResult.skippedOccluded
