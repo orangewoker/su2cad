@@ -37,6 +37,12 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["name"], "A4")
         self.assertEqual(result["scale"], 200)
 
+    def test_fixed_paper_uses_smallest_fitting_scale(self) -> None:
+        result = select_paper_and_scale(34_730.0, 59_897.0, "A3", True)
+        self.assertEqual(result["orientation"], "Portrait")
+        self.assertEqual(result["name"], "A3")
+        self.assertEqual(result["scale"], 200)
+
     def test_bridge_installation_is_detectable(self) -> None:
         self.assertTrue(core.find_bridge_main().is_file())
 

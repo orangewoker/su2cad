@@ -34,17 +34,17 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Cull component and group bounds against the active viewport and section plane before traversing their definitions.
 - Sample line visibility in screen space according to the selected quality profile, cap samples per segment, and reuse nearest-hit depth by screen tile.
 - In the desktop app, run SketchUp extraction as short resumable steps so progress and cancellation remain responsive and one long HTTP request cannot time out the whole scene.
-- In Light quality, never expand millions of repeated component entities. Cache bounded entity samples per definition, use compact range-preserving proxy blocks for dense repeated components, and cap each entity collection at 4000 inspected representatives.
+- In Light quality, never expand millions of repeated component entities. Cache bounded real geometry per definition and reuse it through CAD INSERT rotation, mirroring, and scaling; do not invent bounding-polygon proxy blocks.
 - Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
 - Merge collinear fragments and write curves as one CAD circle, arc, spline, or polyline object.
-- Create CAD circles and arcs only from SketchUp `ArcCurve` sources. Determine closure from SketchUp edge topology, never from coincident projected endpoints alone.
+- Create CAD circles and arcs only from SketchUp `ArcCurve` sources. Accept a full, geometrically closed ArcCurve even when an earlier visibility pass left a stale partial flag; never infer circles from unrelated linework.
 - Preserve suitable top-level SketchUp components and object-sized groups as CAD blocks.
-- Reuse one block definition when normalized projected geometry, size, and orientation match; create separate definitions for different views or dimensions.
+- Reuse one block definition for repeated top-plan instances and restore each instance with CAD INSERT rotation, mirroring, and scaling; create separate definitions for incompatible projected views.
 - Prefer complete block geometry for retained SketchUp components instead of dropping the whole object because a bounding-box visibility sample is occluded.
 - Place block references on sanitized `SU-BLOCK_*` layers derived from SketchUp component or group names.
-- Limit dense mesh-derived block linework to spatially distributed representative lines while preserving block extents and insert coordinates.
+- Limit only vegetation and other dense mesh-derived block linework to spatially distributed representative lines; preserve complete hard linework for furniture and ordinary components.
 - Place vegetation blocks on `SU-PLANTS-BLOCKS` so they can be frozen or hidden as a unit.
 - Export visible SketchUp face materials as RGB solid CAD hatches while using unpainted foreground faces as non-printing occlusion masks.
 - Resolve projected material visibility with per-face depth planes so sloped and crossing surfaces are clipped at their actual depth boundary.
@@ -56,7 +56,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Add overall projected width and height dimensions in model space.
 - Determine orientation from projected geometry: wider drawings use landscape and taller drawings use portrait.
 - In automatic mode, choose the smallest fitting standard A-series sheet from A4 through A0 at a practical architectural scale derived from the drawing size.
-- Use standard A-series dimensions: A4, A3, A2, A1, or A0. Allow a requested paper size to override automatic selection while preserving automatic orientation.
+- Use standard A-series dimensions: A4, A3, A2, A1, or A0. Allow a requested paper size to override automatic selection while preserving automatic orientation, then choose the smallest standard scale that fits that fixed sheet.
 - Create a paper-space layout named `<paper>-L` or `<paper>-P` with an outer edge, binding-margin inner border, full-width bottom title strip, drawing title, scale, sheet/orientation label, and viewport.
 - Keep the viewport above the title strip and include overall dimensions inside the printable area.
 - Keep source SketchUp tags on sanitized `SU-*` CAD layers.

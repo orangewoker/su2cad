@@ -97,6 +97,32 @@ def point2(value: Iterable[float]) -> tuple[float, float]:
     return float(data[0]), float(data[1])
 
 
+def reference_parameters(reference: dict) -> tuple[tuple[float, float], float, float, float]:
+    return (
+        point2(reference.get("insert", (0.0, 0.0))),
+        float(reference.get("rotation", 0.0)),
+        float(reference.get("xscale", 1.0)),
+        float(reference.get("yscale", 1.0)),
+    )
+
+
+def transform_reference_point(
+    point: Iterable[float],
+    insert: tuple[float, float],
+    rotation: float = 0.0,
+    xscale: float = 1.0,
+    yscale: float = 1.0,
+) -> tuple[float, float]:
+    x, y = point2(point)
+    angle = math.radians(rotation)
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    return (
+        insert[0] + (cosine * xscale * x) - (sine * yscale * y),
+        insert[1] + (sine * xscale * x) + (cosine * yscale * y),
+    )
+
+
 def is_plant_name(value: str) -> bool:
     folded = str(value or "").casefold()
     return any(term.casefold() in folded for term in PLANT_TERMS)
@@ -215,8 +241,14 @@ def add_curve(layout, raw: dict, layer: str) -> list[tuple[float, float]]:
     points = [point2(point) for point in raw.get("points", [])]
     if len(points) < 2:
         return []
-    closed = bool(raw.get("closed")) and not bool(raw.get("partiallyOccluded"))
     is_arc_curve = raw.get("curveType") == "ArcCurve"
+    endpoint_closed = len(points) >= 4 and math.dist(points[0], points[-1]) < 0.01
+    # SketchUp occasionally reports a full ArcCurve as an open/partially clipped
+    # path after viewport processing even though its sampled endpoints coincide.
+    # Geometric closure plus a full circular fit is more reliable than that flag.
+    closed = (
+        bool(raw.get("closed")) and not bool(raw.get("partiallyOccluded"))
+    ) or (is_arc_curve and endpoint_closed)
     unique_count = len(points) - 1 if closed and math.dist(points[0], points[-1]) < 0.01 else len(points)
     circle = fit_circle(points) if is_arc_curve and unique_count >= (8 if closed else 4) else None
     if circle:
@@ -276,12 +308,18 @@ def iter_polygon_parts(geometry, min_area: float = MIN_HATCH_AREA_MM2) -> Iterab
             yield from iter_polygon_parts(part, min_area)
 
 
-def fill_polygon(raw: dict, offset: tuple[float, float]) -> Polygon | MultiPolygon | None:
+def fill_polygon(
+    raw: dict,
+    offset: tuple[float, float],
+    rotation: float = 0.0,
+    xscale: float = 1.0,
+    yscale: float = 1.0,
+) -> Polygon | MultiPolygon | None:
     outer_loops: list[list[tuple[float, float]]] = []
     holes: list[list[tuple[float, float]]] = []
     for loop in raw.get("loops", []):
         points = [
-            (float(point[0]) + offset[0], float(point[1]) + offset[1])
+            transform_reference_point(point, offset, rotation, xscale, yscale)
             for point in loop.get("points", [])
         ]
         if len(points) < 3:
@@ -313,18 +351,16 @@ def projected_depth_plane(
     raw: dict,
     offset: tuple[float, float],
     depth_offset: float,
+    rotation: float = 0.0,
+    xscale: float = 1.0,
+    yscale: float = 1.0,
 ) -> tuple[float, float, float]:
     points = []
     for loop in raw.get("loops", []):
         for point in loop.get("points", []):
             if len(point) >= 3:
-                points.append(
-                    (
-                        float(point[0]) + offset[0],
-                        float(point[1]) + offset[1],
-                        float(point[2]) + depth_offset,
-                    )
-                )
+                x, y = transform_reference_point(point, offset, rotation, xscale, yscale)
+                points.append((x, y, float(point[2]) + depth_offset))
     fallback = float(raw.get("depth", 0.0)) + depth_offset
     if len(points) < 3:
         return 0.0, 0.0, fallback
@@ -349,9 +385,17 @@ def raw_block_is_plant(raw_block: dict) -> bool:
 def expanded_fills(payload: dict) -> list[ProjectedFill]:
     records: list[ProjectedFill] = []
 
-    def append(raw: dict, offset: tuple[float, float], depth_offset: float, plant: bool = False) -> None:
+    def append(
+        raw: dict,
+        offset: tuple[float, float],
+        depth_offset: float,
+        plant: bool = False,
+        rotation: float = 0.0,
+        xscale: float = 1.0,
+        yscale: float = 1.0,
+    ) -> None:
         try:
-            geometry = fill_polygon(raw, offset)
+            geometry = fill_polygon(raw, offset, rotation, xscale, yscale)
             if geometry is None:
                 return
             color_data = raw.get("color")
@@ -365,7 +409,9 @@ def expanded_fills(payload: dict) -> list[ProjectedFill]:
                 ProjectedFill(
                     geometry=geometry,
                     depth=depth,
-                    depth_plane=projected_depth_plane(raw, offset, depth_offset),
+                    depth_plane=projected_depth_plane(
+                        raw, offset, depth_offset, rotation, xscale, yscale
+                    ),
                     paint=bool(raw.get("paint", color is not None)),
                     layer=(
                         PLANT_BLOCK_LAYER
@@ -387,7 +433,7 @@ def expanded_fills(payload: dict) -> list[ProjectedFill]:
     for reference in payload.get("blockReferences", []):
         block_name = str(reference.get("block", ""))
         raw_block = raw_blocks.get(block_name, {})
-        offset = point2(reference.get("insert", (0.0, 0.0)))
+        offset, rotation, xscale, yscale = reference_parameters(reference)
         depth_offset = float(reference.get("depth", 0.0))
         plant = (
             raw_block_is_plant(raw_block)
@@ -395,7 +441,7 @@ def expanded_fills(payload: dict) -> list[ProjectedFill]:
             or is_plant_name(reference.get("sourceName", ""))
         )
         for raw in raw_block.get("fills", []):
-            append(raw, offset, depth_offset, plant)
+            append(raw, offset, depth_offset, plant, rotation, xscale, yscale)
     return records
 
 
@@ -706,6 +752,25 @@ def select_paper_and_scale(
     candidates = list(PAPER_SIZES) if requested_paper == "AUTO" else [requested_paper]
     target_scale = preferred_scale(max(width, height))
 
+    # AUTO keeps a practical architectural target scale and grows the sheet to
+    # fit it.  When the user explicitly chooses a sheet, use the smallest
+    # standard scale that fits that sheet instead of leaving most of the paper
+    # empty at the broader AUTO target scale.
+    if requested_paper != "AUTO":
+        name = requested_paper
+        size = paper_dimensions(name, landscape)
+        viewport = paper_viewport_size(size)
+        allowance = 15.0 if dimensions else 0.0
+        usable = (max(viewport[0] - allowance, 1.0), max(viewport[1] - allowance, 1.0))
+        scale = select_scale(width, height, usable)
+        return {
+            "name": name,
+            "size": size,
+            "viewport": viewport,
+            "orientation": "Landscape" if landscape else "Portrait",
+            "scale": scale,
+        }
+
     for name in candidates:
         size = paper_dimensions(name, landscape)
         viewport = paper_viewport_size(size)
@@ -878,17 +943,22 @@ def build(
         name = str(raw_block["name"])
         block = doc.blocks.new(name=name)
         points: list[tuple[float, float]] = []
+        plant_block = raw_block_is_plant(raw_block)
         block_segments = [
             segment for segment in (normalize_segment(raw) for raw in raw_block.get("lines", [])) if segment
         ]
         merged_block_segments = merge_collinear(block_segments)
         block_lines_before += len(merged_block_segments)
-        points.extend(point for segment in merged_block_segments for point in (segment.start, segment.end))
-        output_block_segments, simplified = simplify_dense_segments(merged_block_segments, max_block_lines)
+        output_block_segments, simplified = (
+            simplify_dense_segments(merged_block_segments, max_block_lines)
+            if plant_block
+            else (merged_block_segments, False)
+        )
         block_lines_after += len(output_block_segments)
         simplified_blocks += int(simplified)
         for segment in output_block_segments:
             block.add_line(segment.start, segment.end, dxfattribs={"layer": segment.layer})
+        points.extend(point for segment in output_block_segments for point in (segment.start, segment.end))
         for raw_curve in raw_block.get("curves", []):
             points.extend(add_curve(block, raw_curve, clean_layer(raw_curve.get("layer", "Untagged"))))
         points.extend(
@@ -897,21 +967,33 @@ def build(
             for loop in raw_fill.get("loops", [])
             for point in loop.get("points", [])
         )
-        if raw_block_is_plant(raw_block):
+        if plant_block:
             plant_blocks.add(name)
         block_points[name] = points
 
     for reference in payload.get("blockReferences", []):
         name = str(reference["block"])
-        insert = point2(reference["insert"])
+        insert, rotation, xscale, yscale = reference_parameters(reference)
         source_layer = reference.get("layer", "Untagged")
         layer = (
             PLANT_BLOCK_LAYER
             if name in plant_blocks or is_plant_name(source_layer) or is_plant_name(reference.get("sourceName", ""))
             else clean_layer(source_layer)
         )
-        msp.add_blockref(name, insert, dxfattribs={"layer": layer})
-        extent_points.extend((point[0] + insert[0], point[1] + insert[1]) for point in block_points.get(name, []))
+        msp.add_blockref(
+            name,
+            insert,
+            dxfattribs={
+                "layer": layer,
+                "rotation": rotation,
+                "xscale": xscale,
+                "yscale": yscale,
+            },
+        )
+        extent_points.extend(
+            transform_reference_point(point, insert, rotation, xscale, yscale)
+            for point in block_points.get(name, [])
+        )
 
     if not extent_points:
         raise ValueError("SketchUp current view produced no visible linework")

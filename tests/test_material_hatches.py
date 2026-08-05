@@ -215,6 +215,98 @@ class MaterialHatchTests(unittest.TestCase):
         self.assertEqual(len(modelspace.query("CIRCLE")), 0)
         self.assertTrue(len(modelspace.query("ARC SPLINE LWPOLYLINE")) >= 1)
 
+    def test_geometrically_closed_arc_curve_becomes_editable_circle(self) -> None:
+        doc = ezdxf.new("R2018")
+        modelspace = doc.modelspace()
+        points = []
+        for index in range(25):
+            angle = (2.0 * math.pi * index) / 24
+            points.append([20.0 * math.cos(angle), 20.0 * math.sin(angle)])
+        add_curve(
+            modelspace,
+            {
+                "points": points,
+                "closed": False,
+                "partiallyOccluded": True,
+                "curveType": "ArcCurve",
+            },
+            "SU-CIRCLE",
+        )
+
+        circles = list(modelspace.query("CIRCLE"))
+        self.assertEqual(len(circles), 1)
+        self.assertAlmostEqual(circles[0].dxf.radius, 20.0, places=4)
+
+    def test_rotated_scaled_block_reference_transforms_material_fill(self) -> None:
+        payload = self.base_payload()
+        payload["blocks"] = [
+            {
+                "name": "SU_CHAIR",
+                "sourceName": "Chair",
+                "lines": [{"start": [0, 0], "end": [2, 0], "layer": "Furniture"}],
+                "curves": [],
+                "fills": [
+                    {
+                        "materialName": "Fabric",
+                        "color": [120, 80, 40],
+                        "alpha": 1.0,
+                        "paint": True,
+                        "layer": "MATERIAL_Fabric",
+                        "sourceLayer": "Furniture",
+                        "depth": 0,
+                        "loops": [
+                            {
+                                "outer": True,
+                                "points": [[0, 0, 0], [2, 0, 0], [2, 1, 0], [0, 1, 0]],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+        payload["blockReferences"] = [
+            {
+                "block": "SU_CHAIR",
+                "insert": [10, 20],
+                "depth": 0,
+                "rotation": 90,
+                "xscale": 2,
+                "yscale": 1,
+                "sourceName": "Chair",
+            }
+        ]
+
+        records = expanded_fills(payload)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(tuple(round(value, 4) for value in records[0].geometry.bounds), (9.0, 20.0, 10.0, 24.0))
+
+    def test_regular_furniture_block_is_not_line_sampled(self) -> None:
+        payload = self.base_payload()
+        payload["blocks"] = [
+            {
+                "name": "SU_CHAIR",
+                "sourceName": "Chair",
+                "lines": [
+                    {"start": [index * 2, 0], "end": [index * 2, 10], "layer": "Furniture"}
+                    for index in range(10)
+                ],
+                "curves": [],
+                "fills": [],
+            }
+        ]
+        payload["blockReferences"] = [
+            {"block": "SU_CHAIR", "insert": [0, 0], "depth": 0, "sourceName": "Chair"}
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            json_path = Path(temporary) / "input.json"
+            dxf_path = Path(temporary) / "output.dxf"
+            json_path.write_text(json.dumps(payload), encoding="utf-8")
+            build(json_path, dxf_path, dimensions=False, max_block_lines=2)
+            document = ezdxf.readfile(dxf_path)
+            block = document.blocks.get("SU_CHAIR")
+
+        self.assertEqual(len(block.query("LINE")), 10)
+
     def test_extreme_hatch_boundary_obeys_vertex_budget(self) -> None:
         point_count = MAX_HATCH_VERTICES_PER_GROUP + 10_001
         points = []
