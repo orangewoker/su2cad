@@ -105,6 +105,7 @@ class SU2CADApp:
         self.last_log_message = ""
         self.log_line_count = 0
         self.export_started_at: float | None = None
+        self.switch_buttons: dict[str, ctk.CTkButton] = {}
         self.settings_detail_labels: list[ctk.CTkLabel] = []
         self.settings_path = Path(os.environ.get("APPDATA", str(Path.home()))) / "SU2CAD" / "settings.json"
         self.saved = self._load_settings()
@@ -346,16 +347,19 @@ class SU2CADApp:
         ).grid(
             row=0, column=1, padx=10, pady=8, sticky="e"
         )
-        ctk.CTkSwitch(
-            self.advanced_frame,
+        strict_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        strict_row.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew")
+        strict_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            strict_row,
             text="严格剖切可见性",
-            variable=self.strict_section_var,
-            progress_color=PRIMARY,
-            button_color=SURFACE,
-            button_hover_color=BORDER,
+            text_color=TEXT,
             font=self._font(9),
-            height=24,
-        ).grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="w")
+            height=28,
+        ).grid(row=0, column=0, sticky="w")
+        self._create_toggle_button(strict_row, "严格剖切可见性", self.strict_section_var).grid(
+            row=0, column=1, sticky="e"
+        )
         self.advanced_frame.grid(row=10, column=0, padx=20, pady=(6, 12), sticky="ew")
 
     def _add_switch(self, parent, row: int, title: str, detail: str, variable: tk.BooleanVar) -> None:
@@ -386,15 +390,41 @@ class SU2CADApp:
         )
         detail_label.grid(row=1, column=0, pady=(1, 0), sticky="ew")
         self.settings_detail_labels.append(detail_label)
-        ctk.CTkSwitch(
-            frame,
+        self._create_toggle_button(frame, title, variable).grid(
+            row=0, column=1, rowspan=2, padx=(12, 0), sticky="e"
+        )
+
+    def _create_toggle_button(
+        self,
+        parent: ctk.CTkFrame,
+        name: str,
+        variable: tk.BooleanVar,
+    ) -> ctk.CTkButton:
+        button = ctk.CTkButton(
+            parent,
             text="",
-            width=44,
-            variable=variable,
-            progress_color=PRIMARY,
-            button_color=SURFACE,
-            button_hover_color=BORDER,
-        ).grid(row=0, column=1, sticky="e")
+            width=68,
+            height=30,
+            corner_radius=15,
+            border_width=1,
+            font=self._font(9, "bold"),
+        )
+
+        def sync_state(*_args) -> None:
+            enabled = bool(variable.get())
+            button.configure(
+                text="已开启" if enabled else "已关闭",
+                fg_color=PRIMARY if enabled else SURFACE_ALT,
+                hover_color=PRIMARY_HOVER if enabled else BORDER,
+                border_color=PRIMARY if enabled else "#B8C1CA",
+                text_color=SURFACE if enabled else MUTED,
+            )
+
+        button.configure(command=lambda: variable.set(not variable.get()))
+        variable.trace_add("write", sync_state)
+        sync_state()
+        self.switch_buttons[name] = button
+        return button
 
     def _build_workspace_card(self, parent: ctk.CTkFrame) -> None:
         card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=8, border_width=1, border_color=BORDER)

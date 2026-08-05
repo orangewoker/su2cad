@@ -84,6 +84,10 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertFalse(hasattr(app, "advanced_button"))
             self.assertEqual(app.export_button.cget("fg_color"), "#16A36A")
             self.assertEqual(app.quality_segment.cget("selected_color"), "#16A36A")
+            app.materials_var.set(True)
+            self.assertEqual(app.switch_buttons["材质色块"].cget("text"), "已开启")
+            app.materials_var.set(False)
+            self.assertEqual(app.switch_buttons["材质色块"].cget("text"), "已关闭")
             self.assertIn(
                 app.font_family,
                 {".萍方-简", "萍方-简", "PingFang SC", "苹方-简", "Microsoft YaHei UI", "TkDefaultFont"},
