@@ -30,7 +30,10 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - For softened or smoothed geometry, restore only view-direction silhouette edges; do not emit triangulation seams.
 - When an active SketchUp section plane exists, clip geometry to its kept side and generate true face-plane intersection lines on `SU-SUCAD-SECTION`.
 - Enable ray-test occlusion by default. Use `-DisableOcclusion` only for diagnosis or unusually large models.
-- Treat any ray-test exception as an export failure instead of silently deleting uncertain geometry.
+- Retry ray-test exceptions once. Conservatively keep geometry for a small number of isolated failures and report them; fail the export if failures exceed the bounded tolerance.
+- Cull component and group bounds against the active viewport and section plane before traversing their definitions.
+- Sample line visibility in screen space according to the selected quality profile, cap samples per segment, and reuse nearest-hit depth by screen tile.
+- In the desktop app, run SketchUp extraction as short resumable steps so progress and cancellation remain responsive and one long HTTP request cannot time out the whole scene.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
 - Merge collinear fragments and write curves as one CAD circle, arc, spline, or polyline object.
@@ -66,6 +69,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - `-DisableOcclusion`: skip SketchUp ray testing for faster diagnostic output.
 - `-IncludeHiddenSectionEdges`: diagnostic full-edge section output; expect clutter.
 - `-MaxBlockLines <count>`: cap representative lines in each dense block; default `2500`, use `0` to disable optimization.
+- `-Quality <Light|Balanced|Precise>`: control screen-space occlusion sampling, visibility-boundary refinement, minimum projected material area, and large-scene detail. Default `Balanced`.
 - `-PaperSize <AUTO|A0|A1|A2|A3|A4>`: select the sheet; default `AUTO`. Orientation is always derived from drawing proportions.
 
 ## Validation
@@ -81,3 +85,5 @@ Require all of the following before declaring success:
 - The reported layout exists, uses the reported standard paper dimensions, and its orientation matches the projected geometry.
 - The paper-space frame, full-width title strip, scale text, and viewport exist.
 - AutoCAD title changes to the generated DXF when opening was requested.
+- Bridge failures preserve the Ruby error and backtrace; desktop failures write `SU2CAD_export_failure_*.log` in the selected output folder.
+- If desktop material construction fails, a valid audited linework-only DXF is still produced and the downgrade is reported.

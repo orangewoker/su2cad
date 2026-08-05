@@ -8,6 +8,8 @@ param(
     [switch]$NoMaterials,
     [ValidateRange(0, 1000000)]
     [int]$MaxBlockLines = 2500,
+    [ValidateSet('Light', 'Balanced', 'Precise')]
+    [string]$Quality = 'Balanced',
     [ValidateSet('AUTO', 'A0', 'A1', 'A2', 'A3', 'A4')]
     [string]$PaperSize = 'AUTO'
 )
@@ -51,7 +53,8 @@ $jsonPathLiteral = Convert-ToRubyLiteral $jsonPath
 $occlusionLiteral = if ($DisableOcclusion) { 'false' } else { 'true' }
 $strictSectionLiteral = if ($IncludeHiddenSectionEdges) { 'false' } else { 'true' }
 $materialsLiteral = if ($NoMaterials) { 'false' } else { 'true' }
-$rubyCode = "load('$rubyPathLiteral'); result = SketchupCurrentViewCad.export('$jsonPathLiteral', occlusion: $occlusionLiteral, strict_section_occlusion: $strictSectionLiteral, materials: $materialsLiteral); puts JSON.generate(result); result"
+$qualityLiteral = $Quality.ToLowerInvariant()
+$rubyCode = "load('$rubyPathLiteral'); result = SketchupCurrentViewCad.export('$jsonPathLiteral', occlusion: $occlusionLiteral, strict_section_occlusion: $strictSectionLiteral, materials: $materialsLiteral, quality: '$qualityLiteral'); puts JSON.generate(result); result"
 $requestBody = @{
     command = 'run_ruby'
     args = @{ code = $rubyCode; file = $rubyExporter }
@@ -115,6 +118,7 @@ if (-not $NoOpen) {
     blockLinesAfterOptimization = $builderResult.blockLinesAfterOptimization
     simplifiedBlocks = $builderResult.simplifiedBlocks
     maxBlockLines = $builderResult.maxBlockLines
+    quality = $qualityLiteral
     plantBlockReferences = $builderResult.plantBlockReferences
     materialFaces = $builderResult.materialFaces
     materialHatches = $builderResult.materialHatches

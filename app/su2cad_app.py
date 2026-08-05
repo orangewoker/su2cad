@@ -40,6 +40,10 @@ ERROR = "#C2414D"
 ERROR_SOFT = "#FCEBEC"
 
 QUALITY_LINES = {"轻量": 800, "平衡": 2500, "精细": 6000}
+QUALITY_CODES = {"轻量": "light", "平衡": "balanced", "精细": "precise"}
+COMPACT_BREAKPOINT = 980
+MAX_LOG_LINES = 500
+MAX_EVENTS_PER_TICK = 50
 
 
 def enable_high_dpi() -> None:
@@ -59,7 +63,7 @@ class SU2CADApp:
         self.root = root
         self.root.title(f"SU2CAD {APP_VERSION}")
         self.root.geometry("1180x760")
-        self.root.minsize(1040, 700)
+        self.root.minsize(780, 560)
         self.root.configure(fg_color=BG)
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -71,6 +75,13 @@ class SU2CADApp:
         self.recent_row_widgets: list[ctk.CTkBaseClass] = []
         self.log_visible = False
         self.advanced_visible = False
+        self.compact_mode = False
+        self.compact_settings_visible = False
+        self.resize_job: str | None = None
+        self.last_progress_value = -1
+        self.last_progress_message = ""
+        self.last_log_message = ""
+        self.log_line_count = 0
         self.settings_path = Path(os.environ.get("APPDATA", str(Path.home()))) / "SU2CAD" / "settings.json"
         self.saved = self._load_settings()
         try:
@@ -83,7 +94,8 @@ class SU2CADApp:
         )
         self.paper_var = tk.StringVar(value=self.saved.get("paper_size", "AUTO"))
         self.max_lines_var = tk.StringVar(value=str(saved_max_lines))
-        self.quality_var = tk.StringVar(value=self._quality_for_lines(saved_max_lines))
+        saved_quality = str(self.saved.get("quality", self._quality_for_lines(saved_max_lines)))
+        self.quality_var = tk.StringVar(value=saved_quality if saved_quality in QUALITY_LINES else "平衡")
         self.dimensions_var = tk.BooleanVar(value=bool(self.saved.get("dimensions", True)))
         self.occlusion_var = tk.BooleanVar(value=bool(self.saved.get("occlusion", True)))
         self.materials_var = tk.BooleanVar(value=bool(self.saved.get("material_fills", True)))
@@ -97,8 +109,10 @@ class SU2CADApp:
         self._build_ui()
         self._rebuild_recent()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.root.after(100, self._drain_events)
         self.root.after(200, self._refresh_status)
+        self.root.after(0, lambda: self._apply_responsive_layout(self.root.winfo_width()))
         self._log(f"SU2CAD {APP_VERSION} 已启动")
 
     @staticmethod
@@ -115,6 +129,7 @@ class SU2CADApp:
 
     def _build_header(self) -> None:
         header = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=94)
+        self.header = header
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(1, weight=1)
         header.grid_propagate(False)
@@ -130,6 +145,7 @@ class SU2CADApp:
         ).pack(anchor="w", pady=(2, 0))
 
         model = ctk.CTkFrame(header, fg_color="transparent")
+        self.model_panel = model
         model.grid(row=0, column=1, padx=12, pady=18, sticky="w")
         ctk.CTkLabel(model, text="当前模型", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).pack(anchor="w")
         ctk.CTkLabel(
@@ -140,6 +156,7 @@ class SU2CADApp:
         ).pack(anchor="w", pady=(4, 0))
 
         status = ctk.CTkFrame(header, fg_color="transparent")
+        self.status_panel = status
         status.grid(row=0, column=2, padx=(12, 28), pady=18, sticky="e")
         self.sketchup_chip = ctk.CTkLabel(
             status,
@@ -163,7 +180,7 @@ class SU2CADApp:
             font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
         )
         self.cad_chip.grid(row=0, column=1, padx=(0, 8))
-        ctk.CTkButton(
+        self.refresh_button = ctk.CTkButton(
             status,
             text="刷新",
             width=64,
@@ -173,10 +190,25 @@ class SU2CADApp:
             hover_color=BORDER,
             text_color=TEXT,
             command=self._refresh_status_now,
-        ).grid(row=0, column=2)
+        )
+        self.refresh_button.grid(row=0, column=2)
+        self.compact_settings_button = ctk.CTkButton(
+            status,
+            text="设置",
+            width=72,
+            height=32,
+            corner_radius=8,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER,
+            text_color=TEXT,
+            command=self._toggle_compact_settings,
+        )
+        self.compact_settings_button.grid(row=0, column=3, padx=(8, 0))
+        self.compact_settings_button.grid_remove()
 
     def _build_content(self) -> None:
         content = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
+        self.content = content
         content.grid(row=1, column=0, sticky="nsew", padx=24, pady=20)
         content.grid_columnconfigure(0, minsize=360)
         content.grid_columnconfigure(1, weight=1)
@@ -232,7 +264,7 @@ class SU2CADApp:
         self._add_switch(card, 6, "生成总尺寸", "自动标注图形总宽与总高", self.dimensions_var)
         self._add_switch(card, 7, "完成后打开 CAD", "输出后自动切换到 AutoCAD / 天正", self.open_cad_var)
 
-        ctk.CTkLabel(card, text="线稿精度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+        ctk.CTkLabel(card, text="场景精度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
             row=8, column=0, padx=20, pady=(18, 0), sticky="w"
         )
         self.quality_segment = ctk.CTkSegmentedButton(
@@ -249,6 +281,12 @@ class SU2CADApp:
             text_color=TEXT,
         )
         self.quality_segment.grid(row=9, column=0, padx=20, pady=(8, 14), sticky="ew")
+        ctk.CTkLabel(
+            card,
+            text="同时控制遮挡采样、材质细节和块线数",
+            text_color=MUTED,
+            font=ctk.CTkFont("Microsoft YaHei UI", 10),
+        ).grid(row=10, column=0, padx=20, pady=(0, 8), sticky="w")
 
         self.advanced_button = ctk.CTkButton(
             card,
@@ -260,7 +298,7 @@ class SU2CADApp:
             anchor="w",
             command=self._toggle_advanced,
         )
-        self.advanced_button.grid(row=10, column=0, padx=14, sticky="ew")
+        self.advanced_button.grid(row=11, column=0, padx=14, sticky="ew")
         self.advanced_frame = ctk.CTkFrame(card, fg_color=SURFACE_ALT, corner_radius=8)
         self.advanced_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(self.advanced_frame, text="块最大线数", text_color=TEXT).grid(row=0, column=0, padx=12, pady=12, sticky="w")
@@ -275,7 +313,7 @@ class SU2CADApp:
             button_color=SURFACE,
             button_hover_color=BORDER,
         ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
-        self.advanced_frame.grid(row=11, column=0, padx=20, pady=(6, 20), sticky="ew")
+        self.advanced_frame.grid(row=12, column=0, padx=20, pady=(6, 20), sticky="ew")
         self.advanced_frame.grid_remove()
 
     def _add_switch(self, parent, row: int, title: str, detail: str, variable: tk.BooleanVar) -> None:
@@ -298,6 +336,7 @@ class SU2CADApp:
 
     def _build_workspace_card(self, parent: ctk.CTkFrame) -> None:
         card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=8, border_width=1, border_color=BORDER)
+        self.workspace_card = card
         card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         card.grid_columnconfigure(0, weight=1)
         card.grid_rowconfigure(0, weight=1)
@@ -318,6 +357,19 @@ class SU2CADApp:
         self._build_recent_tab(recent)
 
     def _build_task_tab(self, tab: ctk.CTkFrame) -> None:
+        outer_tab = tab
+        outer_tab.grid_columnconfigure(0, weight=1)
+        outer_tab.grid_rowconfigure(0, weight=1)
+        tab = ctk.CTkScrollableFrame(
+            outer_tab,
+            fg_color="transparent",
+            corner_radius=0,
+            scrollbar_fg_color=SURFACE,
+            scrollbar_button_color="#C7D0D9",
+            scrollbar_button_hover_color="#AEB9C4",
+        )
+        self.task_scroll = tab
+        tab.grid(row=0, column=0, sticky="nsew")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(4, weight=1)
 
@@ -341,14 +393,15 @@ class SU2CADApp:
             text_color=TEXT,
             font=ctk.CTkFont("Microsoft YaHei UI", 18, "bold"),
         ).grid(row=1, column=0, padx=18, pady=(4, 2), sticky="w")
-        ctk.CTkLabel(
+        self.result_detail_label = ctk.CTkLabel(
             state,
             textvariable=self.result_detail_var,
             text_color=MUTED,
             font=ctk.CTkFont("Microsoft YaHei UI", 11),
             wraplength=600,
             justify="left",
-        ).grid(row=2, column=0, padx=18, pady=(2, 16), sticky="w")
+        )
+        self.result_detail_label.grid(row=2, column=0, padx=18, pady=(2, 16), sticky="w")
 
         phase = ctk.CTkFrame(tab, fg_color="transparent")
         phase.grid(row=1, column=0, padx=8, sticky="ew")
@@ -431,13 +484,15 @@ class SU2CADApp:
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=86)
+        self.footer = footer
         footer.grid(row=2, column=0, sticky="ew")
         footer.grid_columnconfigure(1, weight=1)
         footer.grid_propagate(False)
 
-        ctk.CTkLabel(footer, text="输出目录", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).grid(
-            row=0, column=0, padx=(28, 10), pady=23, sticky="w"
+        self.output_label = ctk.CTkLabel(
+            footer, text="输出目录", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)
         )
+        self.output_label.grid(row=0, column=0, padx=(28, 10), pady=23, sticky="w")
         self.output_entry = ctk.CTkEntry(
             footer,
             textvariable=self.output_var,
@@ -448,7 +503,7 @@ class SU2CADApp:
             fg_color="#FAFBFC",
         )
         self.output_entry.grid(row=0, column=1, pady=23, sticky="ew")
-        ctk.CTkButton(
+        self.browse_button = ctk.CTkButton(
             footer,
             text="浏览",
             width=72,
@@ -458,7 +513,8 @@ class SU2CADApp:
             hover_color=BORDER,
             text_color=TEXT,
             command=self._browse_output,
-        ).grid(row=0, column=2, padx=(10, 16), pady=23)
+        )
+        self.browse_button.grid(row=0, column=2, padx=(10, 16), pady=23)
         self.cancel_button = ctk.CTkButton(
             footer,
             text="取消",
@@ -505,6 +561,78 @@ class SU2CADApp:
             self.log_text.grid_remove()
             self.log_button.configure(text="查看详细日志")
 
+    def _on_root_configure(self, event: tk.Event) -> None:
+        if event.widget is not self.root:
+            return
+        if self.resize_job is not None:
+            self.root.after_cancel(self.resize_job)
+        width = int(event.width)
+        self.resize_job = self.root.after(100, lambda: self._apply_responsive_layout(width))
+
+    def _apply_responsive_layout(self, width: int) -> None:
+        self.resize_job = None
+        compact = width < COMPACT_BREAKPOINT
+        available_detail_width = max(260, width - (110 if compact else 520))
+        self.result_detail_label.configure(wraplength=available_detail_width)
+        if compact == self.compact_mode:
+            return
+
+        self.compact_mode = compact
+        if compact:
+            self.header.configure(height=82)
+            self.model_panel.grid_remove()
+            self.cad_chip.grid_remove()
+            self.compact_settings_button.grid()
+            self.content.grid_configure(padx=14, pady=12)
+            self.content.grid_columnconfigure(0, weight=1, minsize=0)
+            self.content.grid_columnconfigure(1, weight=0, minsize=0)
+            self.workspace_card.grid(row=0, column=0, sticky="nsew", padx=0)
+            self.settings_card.grid_remove()
+            self.compact_settings_visible = False
+            self.compact_settings_button.configure(text="设置")
+
+            self.footer.configure(height=126)
+            self.footer.grid_columnconfigure(1, weight=1)
+            self.output_label.grid(row=0, column=0, padx=(16, 8), pady=(14, 6), sticky="w")
+            self.output_entry.grid(row=0, column=1, pady=(14, 6), sticky="ew")
+            self.browse_button.grid(row=0, column=2, padx=(8, 16), pady=(14, 6))
+            self.cancel_button.grid_configure(row=1, column=1, padx=(0, 10), pady=(6, 14), sticky="e")
+            self.export_button.grid_configure(row=1, column=2, padx=(0, 16), pady=(6, 14), sticky="e")
+        else:
+            self.header.configure(height=94)
+            self.model_panel.grid()
+            self.cad_chip.grid()
+            self.compact_settings_button.grid_remove()
+            self.content.grid_configure(padx=24, pady=20)
+            self.content.grid_columnconfigure(0, weight=0, minsize=360)
+            self.content.grid_columnconfigure(1, weight=1, minsize=0)
+            self.settings_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+            self.workspace_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+            self.compact_settings_visible = False
+
+            self.footer.configure(height=86)
+            self.output_label.grid(row=0, column=0, padx=(28, 10), pady=23, sticky="w")
+            self.output_entry.grid(row=0, column=1, pady=23, sticky="ew")
+            self.browse_button.grid(row=0, column=2, padx=(10, 16), pady=23)
+            self.cancel_button.grid_configure(row=0, column=3, padx=(0, 10), pady=22, sticky="")
+            self.export_button.grid_configure(row=0, column=4, padx=(0, 28), pady=21, sticky="")
+
+        if not (self.export_thread and self.export_thread.is_alive()):
+            self.cancel_button.grid_remove()
+
+    def _toggle_compact_settings(self) -> None:
+        if not self.compact_mode:
+            return
+        self.compact_settings_visible = not self.compact_settings_visible
+        if self.compact_settings_visible:
+            self.workspace_card.grid_remove()
+            self.settings_card.grid(row=0, column=0, sticky="nsew", padx=0)
+            self.compact_settings_button.configure(text="返回任务")
+        else:
+            self.settings_card.grid_remove()
+            self.workspace_card.grid(row=0, column=0, sticky="nsew", padx=0)
+            self.compact_settings_button.configure(text="设置")
+
     def _set_quality(self, value: str) -> None:
         self.max_lines_var.set(str(QUALITY_LINES[value]))
 
@@ -526,6 +654,7 @@ class SU2CADApp:
             "output_directory": self.output_var.get(),
             "paper_size": self.paper_var.get(),
             "max_block_lines": max_block_lines,
+            "quality": self.quality_var.get(),
             "dimensions": self.dimensions_var.get(),
             "occlusion": self.occlusion_var.get(),
             "material_fills": self.materials_var.get(),
@@ -559,6 +688,7 @@ class SU2CADApp:
             output_directory=Path(output_text),
             paper_size=self.paper_var.get(),
             max_block_lines=max_lines,
+            quality=QUALITY_CODES.get(self.quality_var.get(), "balanced"),
             dimensions=self.dimensions_var.get(),
             occlusion=self.occlusion_var.get(),
             material_fills=self.materials_var.get(),
@@ -576,6 +706,8 @@ class SU2CADApp:
             return
         self._save_settings()
         self.cancel_event.clear()
+        self.last_progress_value = -1
+        self.last_progress_message = ""
         self.progress.set(0)
         self.phase_var.set("正在启动")
         self._set_state("处理中", WARNING, WARNING_SOFT)
@@ -584,6 +716,8 @@ class SU2CADApp:
         self.last_result = None
         self.open_file_button.configure(state="disabled")
         self.export_button.configure(state="disabled")
+        if self.compact_mode and self.compact_settings_visible:
+            self._toggle_compact_settings()
         self.cancel_button.grid()
         self._log("开始导出当前 SketchUp 视图")
         self.export_thread = threading.Thread(target=self._export_worker, args=(settings,), daemon=True)
@@ -600,7 +734,23 @@ class SU2CADApp:
         except ExportCancelled as exc:
             self.events.put(("cancelled", str(exc)))
         except Exception as exc:
-            self.events.put(("error", (str(exc), traceback.format_exc())))
+            details = traceback.format_exc()
+            self._write_failure_report(settings, str(exc), details)
+            self.events.put(("error", (str(exc), details)))
+
+    def _write_failure_report(self, settings: ExportSettings, message: str, details: str) -> None:
+        try:
+            output = settings.output_directory.expanduser()
+            output.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report = output / f"SU2CAD_export_failure_{timestamp}.log"
+            report.write_text(
+                f"SU2CAD {APP_VERSION}\n时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                f"质量：{settings.quality}\n错误：{message}\n\n{details}",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def _cancel_export(self) -> None:
         self.cancel_event.set()
@@ -617,14 +767,22 @@ class SU2CADApp:
         self.state_badge.configure(text=text, text_color=color, fg_color=soft_color)
 
     def _drain_events(self) -> None:
+        processed = 0
         try:
-            while True:
+            while processed < MAX_EVENTS_PER_TICK:
                 event, payload = self.events.get_nowait()
+                processed += 1
                 if event == "progress":
                     value, message = payload  # type: ignore[misc]
-                    self.progress.set(float(value) / 100.0)
-                    self.phase_var.set(str(message))
-                    self._log(str(message))
+                    numeric_value = int(float(value))
+                    text_message = str(message)
+                    if numeric_value != self.last_progress_value:
+                        self.progress.set(float(numeric_value) / 100.0)
+                        self.last_progress_value = numeric_value
+                    if text_message != self.last_progress_message:
+                        self.phase_var.set(text_message)
+                        self._log(text_message)
+                        self.last_progress_message = text_message
                 elif event == "success":
                     result = payload
                     assert isinstance(result, ExportResult)
@@ -633,10 +791,14 @@ class SU2CADApp:
                     self._set_idle()
                     self._set_state("已完成", SUCCESS, SUCCESS_SOFT)
                     self.result_title_var.set(f"{result.layout}  {result.scale}")
-                    self.result_detail_var.set(
+                    detail = (
                         f"{result.material_count} 种材质，{result.material_hatches} 个色块，"
                         f"{result.block_references} 个块参照，审计错误 {result.audit_errors}"
                     )
+                    if result.warnings:
+                        detail = f"{detail} · {result.warnings[0]}"
+                        self._log(result.warnings[0])
+                    self.result_detail_var.set(detail)
                     self.open_file_button.configure(state="normal")
                     self.tabs.set("当前任务")
                     self._log(f"完成：{result.dxf}")
@@ -653,7 +815,8 @@ class SU2CADApp:
                     self._set_idle()
                     self._set_state("失败", ERROR, ERROR_SOFT)
                     self.result_title_var.set("未能生成 CAD")
-                    self.result_detail_var.set(str(message))
+                    summary = str(message).splitlines()[0]
+                    self.result_detail_var.set(summary[:500])
                     self._log(f"错误：{message}")
                     self._log(str(details))
                     if not self.log_visible:
@@ -664,13 +827,16 @@ class SU2CADApp:
                     self._apply_status(health, cad_running)
         except queue.Empty:
             pass
-        self.root.after(100, self._drain_events)
+        self.root.after(20 if processed == MAX_EVENTS_PER_TICK else 100, self._drain_events)
 
     def _refresh_status(self) -> None:
-        self._refresh_status_now()
-        self.root.after(4000, self._refresh_status)
+        if not (self.export_thread and self.export_thread.is_alive()):
+            self._refresh_status_now()
+        self.root.after(8000, self._refresh_status)
 
     def _refresh_status_now(self) -> None:
+        if self.export_thread and self.export_thread.is_alive():
+            return
         if self.status_refreshing:
             return
         self.status_refreshing = True
@@ -772,8 +938,16 @@ class SU2CADApp:
         os.startfile(path)  # type: ignore[attr-defined]
 
     def _log(self, message: str) -> None:
+        if message == self.last_log_message:
+            return
+        self.last_log_message = message
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert("end", f"[{timestamp}] {message}\n")
+        self.log_line_count += max(1, message.count("\n") + 1)
+        overflow = self.log_line_count - MAX_LOG_LINES
+        if overflow > 0:
+            self.log_text.delete("1.0", f"{overflow + 1}.0")
+            self.log_line_count = MAX_LOG_LINES
         self.log_text.see("end")
 
     def _on_close(self) -> None:

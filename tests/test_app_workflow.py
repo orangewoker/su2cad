@@ -72,6 +72,15 @@ class AppWorkflowTests(unittest.TestCase):
             saved = app._load_settings()
             self.assertEqual(saved["max_block_lines"], 2500)
             self.assertIsInstance(app.settings_card, ctk.CTkScrollableFrame)
+            self.assertIsInstance(app.task_scroll, ctk.CTkScrollableFrame)
+            app._apply_responsive_layout(820)
+            self.assertTrue(app.compact_mode)
+            self.assertEqual(app.compact_settings_button.cget("text"), "设置")
+            app._toggle_compact_settings()
+            self.assertEqual(app.compact_settings_button.cget("text"), "返回任务")
+            app._apply_responsive_layout(1180)
+            self.assertFalse(app.compact_mode)
+            self.assertEqual(app.workspace_card.grid_info()["column"], 1)
             root.destroy()
 
 

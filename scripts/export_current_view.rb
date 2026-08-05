@@ -11,18 +11,47 @@ module SketchupCurrentViewCad
   MIN_FRAGMENT_INCH = 2.0 / MM_PER_INCH
   MIN_FILL_AREA_MM2 = 4.0
   MATERIAL_PREFILTER_AREA_MM2 = 250_000.0
-  VISIBILITY_SAMPLE_MM = 50.0
-  MAX_VISIBILITY_INTERVALS = 4096
-  MAX_CLIP_DEPTH = 7
+  MAX_TOLERATED_RAY_ERRORS = 20
+  EXPORT_SESSIONS = {}
+  QUALITY_PROFILES = {
+    'light' => {
+      sample_pixels: 4.0,
+      max_visibility_intervals: 8,
+      max_clip_depth: 3,
+      depth_tile_pixels: 4.0,
+      min_object_pixels: 0.75,
+      material_sample_pixels2: 16.0
+    },
+    'balanced' => {
+      sample_pixels: 2.0,
+      max_visibility_intervals: 24,
+      max_clip_depth: 5,
+      depth_tile_pixels: 2.0,
+      min_object_pixels: 0.35,
+      material_sample_pixels2: 4.0
+    },
+    'precise' => {
+      sample_pixels: 1.0,
+      max_visibility_intervals: 96,
+      max_clip_depth: 7,
+      depth_tile_pixels: 1.0,
+      min_object_pixels: 0.0,
+      material_sample_pixels2: 1.0
+    }
+  }.freeze
 
   class << self
-    def export(output_path, occlusion: true, strict_section_occlusion: true, materials: true)
+    def export(output_path, occlusion: true, strict_section_occlusion: true, materials: true, quality: 'balanced',
+               cooperative: nil)
       model = Sketchup.active_model
       raise 'No active SketchUp model' unless model
 
       camera = model.active_view.camera
       basis = camera_basis(camera)
       viewport = viewport_bounds(model.active_view, camera)
+      profile = quality_profile(quality)
+      viewport_width_mm = viewport[:max_x] - viewport[:min_x]
+      mm_per_pixel = viewport_width_mm / [model.active_view.vpwidth.to_f, 1.0].max
       section = active_section(model, camera)
       effective_occlusion = section ? strict_section_occlusion : occlusion
       diagonal = [model.bounds.diagonal.to_f, 1000.0].max
@@ -34,6 +63,7 @@ module SketchupCurrentViewCad
         ray_distance: diagonal * 3.0,
         occlusion: effective_occlusion,
         visibility_cache: {},
+        depth_cache: {},
         processed_curves: {},
         lines: [],
         curves: [],
@@ -43,8 +73,13 @@ module SketchupCurrentViewCad
         block_hashes: {},
         block_mode: true,
         emit_materials: materials,
-        material_prefilter: false,
+        material_prefilter: true,
+        profile: profile,
+        quality: quality.to_s,
+        mm_per_pixel: [mm_per_pixel, 1.0e-6].max,
+        cooperative: cooperative,
         skipped_hidden: 0,
+        skipped_offscreen: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -54,7 +89,7 @@ module SketchupCurrentViewCad
       }
 
       walk_entities(model.entities, Geom::Transformation.new, nil, nil, context)
-      if context[:ray_errors].positive?
+      if context[:ray_errors] > MAX_TOLERATED_RAY_ERRORS
         raise "SketchUp visibility ray testing failed #{context[:ray_errors]} times"
       end
 
@@ -95,6 +130,7 @@ module SketchupCurrentViewCad
           materialFaces: context[:material_faces],
           skippedMaterialFaces: context[:skipped_material_faces],
           skippedHidden: context[:skipped_hidden],
+          skippedOffscreen: context[:skipped_offscreen],
           skippedOccluded: context[:skipped_occluded],
           sectionLines: context[:section_lines],
           silhouetteEdges: context[:silhouette_edges],
@@ -104,6 +140,7 @@ module SketchupCurrentViewCad
           requestedOcclusion: occlusion,
           strictSectionOcclusion: strict_section_occlusion,
           materials: materials,
+          quality: quality.to_s,
           rayErrors: context[:ray_errors]
         }
       }
@@ -117,10 +154,102 @@ module SketchupCurrentViewCad
       File.delete(temporary) if defined?(temporary) && temporary && File.exist?(temporary)
     end
 
+    def start_export(output_path, occlusion: true, strict_section_occlusion: true, materials: true, quality: 'balanced')
+      cleanup_export_sessions
+      session_id = "#{Process.pid}-#{(Time.now.to_f * 1000).to_i}-#{rand(1_000_000)}"
+      cooperative = {
+        processed_entities: 0,
+        deadline: nil
+      }
+      fiber = Fiber.new do
+        export(
+          output_path,
+          occlusion: occlusion,
+          strict_section_occlusion: strict_section_occlusion,
+          materials: materials,
+          quality: quality,
+          cooperative: cooperative
+        )
+      end
+      EXPORT_SESSIONS[session_id] = {
+        fiber: fiber,
+        cooperative: cooperative,
+        created_at: Time.now
+      }
+      {
+        ok: true,
+        sessionId: session_id,
+        quality: quality.to_s
+      }
+    end
+
+    def step_export(session_id, budget_ms: 250)
+      session = EXPORT_SESSIONS[session_id.to_s]
+      raise "Unknown or expired export session: #{session_id}" unless session
+
+      budget = [[budget_ms.to_f, 50.0].max, 1000.0].min
+      control = session[:cooperative]
+      control[:deadline] = monotonic_time + (budget / 1000.0)
+      yielded_or_result = session[:fiber].resume
+      if session[:fiber].alive?
+        {
+          ok: true,
+          done: false,
+          processedEntities: control[:processed_entities],
+          checkpoint: yielded_or_result
+        }
+      else
+        EXPORT_SESSIONS.delete(session_id.to_s)
+        {
+          ok: true,
+          done: true,
+          processedEntities: control[:processed_entities],
+          result: yielded_or_result
+        }
+      end
+    rescue StandardError
+      EXPORT_SESSIONS.delete(session_id.to_s)
+      raise
+    end
+
+    def cancel_export(session_id)
+      removed = EXPORT_SESSIONS.delete(session_id.to_s)
+      {
+        ok: true,
+        cancelled: !removed.nil?,
+        sessionId: session_id.to_s
+      }
+    end
+
     private
+
+    def cleanup_export_sessions
+      cutoff = Time.now - 3600
+      EXPORT_SESSIONS.delete_if { |_session_id, session| session[:created_at] < cutoff }
+    end
+
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def quality_profile(quality)
+      QUALITY_PROFILES.fetch(quality.to_s, QUALITY_PROFILES['balanced'])
+    end
+
+    def cooperative_checkpoint(context)
+      control = context[:cooperative]
+      return unless control
+
+      control[:processed_entities] += 1
+      deadline = control[:deadline]
+      return unless deadline && monotonic_time >= deadline
+
+      Fiber.yield(processedEntities: control[:processed_entities])
+    end
 
     def walk_entities(entities, transform, outer_tag, outer_material, context)
       entities.each do |entity|
+        cooperative_checkpoint(context)
         unless entity_visible?(entity)
           context[:skipped_hidden] += 1
           next
@@ -131,6 +260,10 @@ module SketchupCurrentViewCad
           child_tag = outer_tag || tag_name(entity)
           child_material = entity.respond_to?(:material) && entity.material ? entity.material : outer_material
           world_transform = transform * entity.transformation
+          unless instance_intersects_view?(entity, world_transform, context)
+            context[:skipped_offscreen] += 1
+            next
+          end
           block_result = if context[:block_mode] && block_candidate?(entity, world_transform, context)
                            emit_instance_block(entity, world_transform, child_tag, child_material, context)
                          else
@@ -167,6 +300,7 @@ module SketchupCurrentViewCad
         ray_distance: context[:ray_distance],
         occlusion: context[:occlusion],
         visibility_cache: context[:visibility_cache],
+        depth_cache: context[:depth_cache],
         processed_curves: {},
         lines: [],
         curves: [],
@@ -177,7 +311,12 @@ module SketchupCurrentViewCad
         block_mode: false,
         emit_materials: context[:emit_materials],
         material_prefilter: true,
+        profile: context[:profile],
+        quality: context[:quality],
+        mm_per_pixel: context[:mm_per_pixel],
+        cooperative: context[:cooperative],
         skipped_hidden: 0,
+        skipped_offscreen: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -188,6 +327,7 @@ module SketchupCurrentViewCad
       walk_entities(instance.definition.entities, world_transform, outer_tag, outer_material, block_context)
       if block_context[:lines].empty? && block_context[:curves].empty? && block_context[:fills].empty?
         context[:skipped_occluded] += block_context[:skipped_occluded]
+        context[:skipped_offscreen] += block_context[:skipped_offscreen]
         context[:skipped_material_faces] += block_context[:skipped_material_faces]
         context[:ray_errors] += block_context[:ray_errors]
         return :occluded
@@ -226,6 +366,7 @@ module SketchupCurrentViewCad
       context[:section_lines] += block_context[:section_lines]
       context[:silhouette_edges] += block_context[:silhouette_edges]
       context[:skipped_hidden] += block_context[:skipped_hidden]
+      context[:skipped_offscreen] += block_context[:skipped_offscreen]
       context[:skipped_occluded] += block_context[:skipped_occluded]
       context[:skipped_material_faces] += block_context[:skipped_material_faces]
       context[:material_faces] += block_context[:material_faces]
@@ -233,6 +374,33 @@ module SketchupCurrentViewCad
       :emitted
     rescue StandardError
       :fallback
+    end
+
+    def instance_intersects_view?(instance, world_transform, context)
+      points = bounds_corners(instance.definition.bounds).map { |point| point.transform(world_transform) }
+      section = context[:section]
+      if section
+        kept = points.any? do |point|
+          plane_distance(point, section[:plane]) * section[:keep_multiplier] >= -SECTION_TOLERANCE_INCH
+        end
+        return false unless kept
+      end
+
+      projected = points.map { |point| project(point, context[:basis]) }
+      xs = projected.map { |point| point[0] }
+      ys = projected.map { |point| point[1] }
+      viewport = context[:viewport]
+      return false if xs.max < viewport[:min_x] || xs.min > viewport[:max_x]
+      return false if ys.max < viewport[:min_y] || ys.min > viewport[:max_y]
+
+      min_pixels = context[:profile][:min_object_pixels]
+      return true unless min_pixels.positive?
+
+      width_pixels = (xs.max - xs.min) / context[:mm_per_pixel]
+      height_pixels = (ys.max - ys.min) / context[:mm_per_pixel]
+      width_pixels >= min_pixels || height_pixels >= min_pixels
+    rescue StandardError
+      true
     end
 
     def normalize_block_geometry(lines, curves, fills)
@@ -341,7 +509,13 @@ module SketchupCurrentViewCad
       section_pair = clip_segment_to_section(start_point, end_point, context[:section])
       return unless section_pair
 
-      fragments = clip_visible_segment(section_pair[0], section_pair[1], context)
+      viewport_pair = clip_world_segment_to_viewport(section_pair[0], section_pair[1], context)
+      unless viewport_pair
+        context[:skipped_offscreen] += 1
+        return
+      end
+
+      fragments = clip_visible_segment(viewport_pair[0], viewport_pair[1], context)
       if fragments.empty?
         context[:skipped_occluded] += 1
         return
@@ -418,9 +592,14 @@ module SketchupCurrentViewCad
         area = polygon_area2(loop[:points])
         loop[:outer] ? area : -area
       end.abs
+      projected_area_pixels2 = projected_area / (context[:mm_per_pixel]**2)
+      if projected_area_pixels2 < context[:profile][:material_sample_pixels2]
+        context[:skipped_material_faces] += 1
+        return
+      end
       if context[:material_prefilter] && projected_area < MATERIAL_PREFILTER_AREA_MM2
-        sample_count = projected_area >= 10_000.0 ? 3 : 1
-        samples = face_visibility_samples(face, transform, sample_count, projected_area >= 100_000.0)
+        sample_count = projected_area_pixels2 >= 64.0 ? 3 : 1
+        samples = face_visibility_samples(face, transform, sample_count, projected_area_pixels2 >= 256.0)
         if context[:occlusion] && samples.none? { |point| visible_point?(point, context) }
           context[:skipped_material_faces] += 1
           return
@@ -612,7 +791,8 @@ module SketchupCurrentViewCad
       runs = []
       current = []
       points.each_cons(2) do |start_point, end_point|
-        fragments = clip_visible_segment(start_point, end_point, context)
+        viewport_pair = clip_world_segment_to_viewport(start_point, end_point, context)
+        fragments = viewport_pair ? clip_visible_segment(viewport_pair[0], viewport_pair[1], context) : []
         if fragments.empty?
           runs << current if current.length > 1
           current = []
@@ -631,6 +811,18 @@ module SketchupCurrentViewCad
       end
       runs << current if current.length > 1
       runs
+    end
+
+    def clip_world_segment_to_viewport(start_point, end_point, context)
+      projected_start = project(start_point, context[:basis])
+      projected_end = project(end_point, context[:basis])
+      ratios = clip_segment_ratios(projected_start, projected_end, context[:viewport])
+      return nil unless ratios
+
+      [
+        Geom.linear_combination(1.0 - ratios[0], start_point, ratios[0], end_point),
+        Geom.linear_combination(1.0 - ratios[1], start_point, ratios[1], end_point)
+      ]
     end
 
     def same_world_polyline?(source, runs)
@@ -670,7 +862,17 @@ module SketchupCurrentViewCad
     end
 
     def clip_projected_segment(start_point, end_point, viewport)
-      return [start_point, end_point] unless viewport
+      ratios = clip_segment_ratios(start_point, end_point, viewport)
+      return nil unless ratios
+
+      [
+        interpolate_projected(start_point, end_point, ratios[0]),
+        interpolate_projected(start_point, end_point, ratios[1])
+      ]
+    end
+
+    def clip_segment_ratios(start_point, end_point, viewport)
+      return [0.0, 1.0] unless viewport
 
       dx = end_point[0] - start_point[0]
       dy = end_point[1] - start_point[1]
@@ -697,11 +899,7 @@ module SketchupCurrentViewCad
         end
         return nil if lower > upper
       end
-
-      [
-        interpolate_projected(start_point, end_point, lower),
-        interpolate_projected(start_point, end_point, upper)
-      ]
+      [lower, upper]
     end
 
     def clip_projected_polygon(points, viewport)
@@ -747,8 +945,12 @@ module SketchupCurrentViewCad
     def clip_visible_segment(start_point, end_point, context)
       return [[start_point, end_point]] unless context[:occlusion]
 
-      length = start_point.distance(end_point)
-      intervals = [[(length * MM_PER_INCH / VISIBILITY_SAMPLE_MM).ceil, 2].max, MAX_VISIBILITY_INTERVALS].min
+      projected_start = project(start_point, context[:basis])
+      projected_end = project(end_point, context[:basis])
+      projected_length_mm = Math.sqrt(distance2(projected_start, projected_end))
+      sample_step_mm = context[:mm_per_pixel] * context[:profile][:sample_pixels]
+      desired_intervals = (projected_length_mm / [sample_step_mm, 1.0e-6].max).ceil
+      intervals = [[desired_intervals, 2].max, context[:profile][:max_visibility_intervals]].min
       points = (0..intervals).map do |index|
         ratio = index.to_f / intervals
         Geom.linear_combination(1.0 - ratio, start_point, ratio, end_point)
@@ -774,7 +976,7 @@ module SketchupCurrentViewCad
     def visibility_boundary(start_point, end_point, start_visible, context)
       left = start_point
       right = end_point
-      MAX_CLIP_DEPTH.times do
+      context[:profile][:max_clip_depth].times do
         midpoint = Geom.linear_combination(0.5, left, 0.5, right)
         if visible_point?(midpoint, context) == start_visible
           left = midpoint
@@ -800,18 +1002,37 @@ module SketchupCurrentViewCad
     def visible_point?(point, context)
       return true unless context[:occlusion]
 
-      key = point.to_a.map { |value| (value.to_f * 1000).round }
-      cached = context[:visibility_cache][key]
-      return cached unless cached.nil?
+      projected = project(point, context[:basis])
+      tile_mm = context[:mm_per_pixel] * context[:profile][:depth_tile_pixels]
+      viewport = context[:viewport]
+      key = [
+        ((projected[0] - viewport[:min_x]) / tile_mm).floor,
+        ((projected[1] - viewport[:min_y]) / tile_mm).floor
+      ]
+      if context[:depth_cache].key?(key)
+        hit_depth = context[:depth_cache][key]
+        return true if hit_depth.nil?
+
+        return (hit_depth - projected[2]).abs <= (VISIBILITY_TOLERANCE_INCH * MM_PER_INCH)
+      end
 
       direction = context[:basis][:forward]
       origin = ray_origin(point, direction, context)
-      hit = context[:model].raytest([origin, direction], true)
-      visible = hit.nil? || hit[0].distance(point) <= VISIBILITY_TOLERANCE_INCH
+      hit = raytest_with_retry(context[:model], origin, direction)
+      hit_depth = hit && project(hit[0], context[:basis])[2]
+      context[:depth_cache][key] = hit_depth
+      visible = hit_depth.nil? || (hit_depth - projected[2]).abs <= (VISIBILITY_TOLERANCE_INCH * MM_PER_INCH)
       context[:visibility_cache][key] = visible
+      visible
     rescue StandardError
       context[:ray_errors] += 1
-      false
+      true
+    end
+
+    def raytest_with_retry(model, origin, direction)
+      model.raytest([origin, direction], true)
+    rescue StandardError
+      model.raytest([origin, direction], true)
     end
 
     def ray_origin(point, direction, context)

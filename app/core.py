@@ -14,7 +14,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -37,11 +37,19 @@ class ExportCancelled(RuntimeError):
     pass
 
 
+class BridgeRequestError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None, payload: dict | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload or {}
+
+
 @dataclass(frozen=True)
 class ExportSettings:
     output_directory: Path
     paper_size: str = "AUTO"
     max_block_lines: int = 2500
+    quality: str = "balanced"
     dimensions: bool = True
     occlusion: bool = True
     material_fills: bool = True
@@ -68,6 +76,7 @@ class ExportResult:
     block_lines_after: int
     audit_errors: int
     opened_in_cad: bool
+    warnings: tuple[str, ...] = ()
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -94,9 +103,30 @@ def _request_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        error = str(payload.get("error") or raw.strip() or f"HTTP {exc.code} {exc.reason}")
+        backtrace = payload.get("backtrace")
+        if isinstance(backtrace, list) and backtrace:
+            error = f"{error}\n" + "\n".join(str(line) for line in backtrace[:20])
+        stdout = str(payload.get("stdout") or "").strip()
+        stderr = str(payload.get("stderr") or "").strip()
+        if stdout:
+            error = f"{error}\nSketchUp 输出：{stdout[-2000:]}"
+        if stderr:
+            error = f"{error}\nSketchUp 错误输出：{stderr[-2000:]}"
+        raise BridgeRequestError(
+            f"SketchUp Bridge 返回 HTTP {exc.code}：{error}",
+            status_code=exc.code,
+            payload=payload,
+        ) from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
-        raise RuntimeError(f"无法连接 SketchUp Bridge：{reason}") from exc
+        raise BridgeRequestError(f"无法连接 SketchUp Bridge：{reason}") from exc
 
 
 def bridge_health(timeout: int = 3) -> dict:
@@ -175,6 +205,117 @@ def _check_cancelled(is_cancelled: CancelCallback) -> None:
         raise ExportCancelled("任务已取消")
 
 
+def _parse_stdout_json(response: dict) -> dict:
+    stdout = str(response.get("stdout") or "")
+    for line in reversed(stdout.splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise RuntimeError("SketchUp Bridge 未返回有效的任务状态")
+
+
+def _run_ruby_json(code: str, file: Path, token: str, *, timeout: int = 60) -> dict:
+    response = _request_json(
+        "/command",
+        method="POST",
+        body={
+            "command": "run_ruby",
+            "args": {"code": code, "file": str(file)},
+            "timeout_ms": max(1, timeout - 2) * 1000,
+        },
+        headers={"X-Codex-SketchUp-Token": token},
+        timeout=timeout,
+    )
+    if not response.get("ok"):
+        raise RuntimeError(f"SketchUp 命令失败：{response.get('error', '未知错误')}")
+    return _parse_stdout_json(response)
+
+
+def _abort_bridge_export(session_id: str, ruby_exporter: Path, token: str) -> None:
+    ruby_code = (
+        f"result = SketchupCurrentViewCad.cancel_export('{_ruby_literal(session_id)}'); "
+        "puts JSON.generate(result); result"
+    )
+    try:
+        _run_ruby_json(ruby_code, ruby_exporter, token, timeout=15)
+    except Exception:
+        pass
+
+
+def _extract_geometry_chunked(
+    json_path: Path,
+    ruby_exporter: Path,
+    token: str,
+    settings: ExportSettings,
+    progress: ProgressCallback,
+    is_cancelled: CancelCallback,
+) -> dict:
+    quality = settings.quality if settings.quality in {"light", "balanced", "precise"} else "balanced"
+    start_code = (
+        f"load('{_ruby_literal(str(ruby_exporter))}'); "
+        "result = SketchupCurrentViewCad.start_export("
+        f"'{_ruby_literal(str(json_path))}', "
+        f"occlusion: {'true' if settings.occlusion else 'false'}, "
+        f"strict_section_occlusion: {'true' if settings.strict_section_occlusion else 'false'}, "
+        f"materials: {'true' if settings.material_fills else 'false'}, "
+        f"quality: '{quality}'"
+        "); puts JSON.generate(result); result"
+    )
+    started = _run_ruby_json(start_code, ruby_exporter, token, timeout=30)
+    session_id = str(started.get("sessionId") or "")
+    if not session_id:
+        raise RuntimeError("SketchUp 未创建有效的导出会话")
+
+    try:
+        last_reported = -1
+        while True:
+            if is_cancelled():
+                _abort_bridge_export(session_id, ruby_exporter, token)
+                raise ExportCancelled("任务已取消")
+            step_code = (
+                f"result = SketchupCurrentViewCad.step_export('{_ruby_literal(session_id)}', budget_ms: 250); "
+                "puts JSON.generate(result); result"
+            )
+            step = _run_ruby_json(step_code, ruby_exporter, token, timeout=30)
+            processed = max(0, int(step.get("processedEntities") or 0))
+            if processed != last_reported:
+                # Entity totals are not known without another expensive full traversal.
+                # Keep extraction progress bounded and report the real processed count.
+                estimated = min(58, 12 + int(46 * processed / (processed + 12_000)))
+                progress(estimated, f"正在提取当前视图几何 · 已处理 {processed:,} 个实体")
+                last_reported = processed
+            if step.get("done"):
+                result = step.get("result")
+                return result if isinstance(result, dict) else {}
+    except Exception:
+        _abort_bridge_export(session_id, ruby_exporter, token)
+        raise
+
+
+def _linework_fallback_json(source: Path) -> Path:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["fills"] = []
+    for block in payload.get("blocks", []):
+        if isinstance(block, dict):
+            block["fills"] = []
+    stats = payload.get("stats")
+    if isinstance(stats, dict):
+        stats["fills"] = 0
+        stats["materials"] = False
+        stats["materialFallback"] = True
+    fallback = source.with_name(f"{source.stem}_linework_only.json")
+    temporary = fallback.with_suffix(f"{fallback.suffix}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    temporary.replace(fallback)
+    return fallback
+
+
 def export_current_view(
     settings: ExportSettings,
     progress: ProgressCallback,
@@ -201,43 +342,46 @@ def export_current_view(
     if not ruby_exporter.exists():
         raise FileNotFoundError(f"缺少导出器：{ruby_exporter}")
 
-    ruby_code = (
-        f"load('{_ruby_literal(str(ruby_exporter))}'); "
-        "result = SketchupCurrentViewCad.export("
-        f"'{_ruby_literal(str(json_path))}', "
-        f"occlusion: {'true' if settings.occlusion else 'false'}, "
-        f"strict_section_occlusion: {'true' if settings.strict_section_occlusion else 'false'}, "
-        f"materials: {'true' if settings.material_fills else 'false'}"
-        "); puts JSON.generate(result); result"
-    )
-    request_body = {
-        "command": "run_ruby",
-        "args": {"code": ruby_code, "file": str(ruby_exporter)},
-        "timeout_ms": 600_000,
-    }
-
     progress(12, "正在提取当前视图几何")
-    response = _request_json(
-        "/command",
-        method="POST",
-        body=request_body,
-        headers={"X-Codex-SketchUp-Token": token},
-        timeout=620,
+    extraction_result = _extract_geometry_chunked(
+        json_path,
+        ruby_exporter,
+        token,
+        settings,
+        progress,
+        is_cancelled,
     )
-    if not response.get("ok"):
-        raise RuntimeError(f"SketchUp 几何提取失败：{response.get('error', '未知错误')}")
     if not json_path.exists() or json_path.stat().st_size == 0:
         raise RuntimeError("SketchUp 未生成有效线稿 JSON")
     _check_cancelled(is_cancelled)
 
     progress(62, "正在计算材质色块并生成 DXF")
-    builder_result = build_dxf(
-        json_path,
-        provisional_dxf,
-        dimensions=settings.dimensions,
-        max_block_lines=settings.max_block_lines,
-        requested_paper=settings.paper_size,
-    )
+    warnings: list[str] = []
+    ray_errors = int(extraction_result.get("rayErrors") or 0)
+    if ray_errors:
+        warnings.append(f"{ray_errors} 个遮挡采样点异常，已保守保留对应几何")
+    build_json_path = json_path
+    try:
+        builder_result = build_dxf(
+            build_json_path,
+            provisional_dxf,
+            dimensions=settings.dimensions,
+            max_block_lines=settings.max_block_lines,
+            requested_paper=settings.paper_size,
+        )
+    except Exception as material_error:
+        if not settings.material_fills:
+            raise
+        warnings.insert(0, f"材质色块处理失败，已自动生成纯线稿：{material_error}")
+        progress(70, "材质处理失败，正在降级生成完整线稿")
+        build_json_path = _linework_fallback_json(json_path)
+        builder_result = build_dxf(
+            build_json_path,
+            provisional_dxf,
+            dimensions=settings.dimensions,
+            max_block_lines=settings.max_block_lines,
+            requested_paper=settings.paper_size,
+        )
     _check_cancelled(is_cancelled)
 
     orientation = str(builder_result["paperOrientation"])
@@ -273,4 +417,5 @@ def export_current_view(
         block_lines_after=int(builder_result["blockLinesAfterOptimization"]),
         audit_errors=int(builder_result["auditErrors"]),
         opened_in_cad=opened,
+        warnings=tuple(warnings),
     )
