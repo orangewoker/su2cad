@@ -75,6 +75,8 @@ class CoreTests(unittest.TestCase):
 
     def test_desktop_icon_exists(self) -> None:
         self.assertTrue((core.resource_root() / "assets" / "su2cad.ico").is_file())
+        for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
+            self.assertTrue((core.resource_root() / "assets" / f"su2cad-{size}.png").is_file())
 
     def test_http_500_preserves_bridge_error_details(self) -> None:
         payload = {

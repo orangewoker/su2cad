@@ -84,6 +84,22 @@ class SU2CADApp:
                 self.root.iconbitmap(default=str(icon_path))
             except tk.TclError:
                 pass
+        self.icon_images: list[tk.PhotoImage] = []
+        for icon_size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
+            png_path = resource_root() / "assets" / f"su2cad-{icon_size}.png"
+            if not png_path.exists():
+                continue
+            try:
+                self.icon_images.append(tk.PhotoImage(file=str(png_path)))
+            except tk.TclError:
+                continue
+        if self.icon_images:
+            try:
+                # Supplying native-size images prevents Tk/Windows from scaling
+                # one large frame down into a blurry taskbar icon.
+                self.root.iconphoto(True, *self.icon_images)
+            except tk.TclError:
+                pass
         self.root.geometry("1180x760")
         self.root.minsize(780, 560)
         self.root.configure(fg_color=BG)

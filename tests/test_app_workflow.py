@@ -85,6 +85,7 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertFalse(hasattr(app, "advanced_button"))
             self.assertEqual(app.export_button.cget("fg_color"), "#16A36A")
             self.assertEqual(app.quality_segment.cget("selected_color"), "#16A36A")
+            self.assertEqual(len(app.icon_images), 9)
             app.materials_var.set(True)
             self.assertEqual(app.switch_buttons["材质色块"].cget("text"), "已开启")
             app.materials_var.set(False)

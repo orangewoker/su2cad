@@ -8,6 +8,10 @@ sys.path.insert(0, str(root / "app"))
 sys.path.insert(0, str(root / "scripts"))
 customtkinter_data = collect_data_files("customtkinter")
 app_icon = root / "assets" / "su2cad.ico"
+app_icon_pngs = [
+    root / "assets" / f"su2cad-{size}.png"
+    for size in (16, 20, 24, 32, 40, 48, 64, 128, 256)
+]
 
 a = Analysis(
     [str(root / "app" / "su2cad_app.py")],
@@ -16,6 +20,7 @@ a = Analysis(
     datas=[
         (str(root / "scripts" / "export_current_view.rb"), "scripts"),
         (str(app_icon), "assets"),
+        *((str(path), "assets") for path in app_icon_pngs),
         *customtkinter_data,
     ],
     hiddenimports=[],
