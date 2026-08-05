@@ -34,6 +34,8 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Cull component and group bounds against the active viewport and section plane before traversing their definitions.
 - Sample line visibility in screen space according to the selected quality profile, cap samples per segment, and reuse nearest-hit depth by screen tile.
 - In the desktop app, run SketchUp extraction as short resumable steps so progress and cancellation remain responsive and one long HTTP request cannot time out the whole scene.
+- In Light quality, never expand millions of repeated component entities. Cache bounded entity samples per definition, use compact range-preserving proxy blocks for dense repeated components, and cap each entity collection at 4000 inspected representatives.
+- Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
 - Merge collinear fragments and write curves as one CAD circle, arc, spline, or polyline object.

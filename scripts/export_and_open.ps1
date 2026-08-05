@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$stopwatch = [Diagnostics.Stopwatch]::StartNew()
 
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rubyExporter = Join-Path $scriptDirectory 'export_current_view.rb'
@@ -103,6 +104,7 @@ if (-not $NoOpen) {
     }
 }
 
+$stopwatch.Stop()
 [ordered]@{
     ok = $true
     sketchupVersion = $health.sketchup_version
@@ -135,4 +137,5 @@ if (-not $NoOpen) {
     sourcePerspective = $builderResult.sourcePerspective
     auditErrors = $builderResult.auditErrors
     openedInCad = -not $NoOpen
+    elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
 } | ConvertTo-Json -Depth 6

@@ -12,6 +12,11 @@ module SketchupCurrentViewCad
   MIN_FILL_AREA_MM2 = 4.0
   MATERIAL_PREFILTER_AREA_MM2 = 250_000.0
   MAX_TOLERATED_RAY_ERRORS = 20
+  LIGHT_BLOCK_ENTITY_BUDGET = 12_000
+  LIGHT_ENTITY_SAMPLES_PER_COLLECTION = 4_000
+  LIGHT_REPEATED_COMPONENT_THRESHOLD = 300
+  LIGHT_UNIQUE_COMPONENT_THRESHOLD = 20_000
+  LIGHT_PROXY_SEGMENTS = 12
   EXPORT_SESSIONS = {}
   QUALITY_PROFILES = {
     'light' => {
@@ -71,6 +76,9 @@ module SketchupCurrentViewCad
         blocks: [],
         block_references: [],
         block_hashes: {},
+        light_block_cache: {},
+        light_entity_collections: {},
+        light_material_cache: {},
         block_mode: true,
         emit_materials: materials,
         material_prefilter: true,
@@ -78,8 +86,12 @@ module SketchupCurrentViewCad
         quality: quality.to_s,
         mm_per_pixel: [mm_per_pixel, 1.0e-6].max,
         cooperative: cooperative,
+        light_sampling: quality.to_s == 'light',
+        light_entity_budget: nil,
         skipped_hidden: 0,
         skipped_offscreen: 0,
+        skipped_sampled: 0,
+        reused_block_references: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -131,11 +143,13 @@ module SketchupCurrentViewCad
           skippedMaterialFaces: context[:skipped_material_faces],
           skippedHidden: context[:skipped_hidden],
           skippedOffscreen: context[:skipped_offscreen],
+          skippedSampled: context[:skipped_sampled],
           skippedOccluded: context[:skipped_occluded],
           sectionLines: context[:section_lines],
           silhouetteEdges: context[:silhouette_edges],
           blocks: context[:blocks].length,
           blockReferences: context[:block_references].length,
+          reusedBlockReferences: context[:reused_block_references],
           occlusion: effective_occlusion,
           requestedOcclusion: occlusion,
           strictSectionOcclusion: strict_section_occlusion,
@@ -248,7 +262,19 @@ module SketchupCurrentViewCad
     end
 
     def walk_entities(entities, transform, outer_tag, outer_material, context)
-      entities.each do |entity|
+      source_count = entities.respond_to?(:length) ? entities.length.to_i : 0
+      selected_entities = context[:light_sampling] ? light_sampled_entities(entities, context) : entities
+      selected_count = selected_entities.respond_to?(:length) ? selected_entities.length.to_i : source_count
+      selected_entities.each_with_index do |entity, index|
+        budget = context[:light_entity_budget]
+        if budget
+          if budget[:remaining] <= 0
+            context[:light_budget_exhausted] = true
+            context[:skipped_sampled] += [selected_count - index, 0].max
+            break
+          end
+          budget[:remaining] -= 1
+        end
         cooperative_checkpoint(context)
         unless entity_visible?(entity)
           context[:skipped_hidden] += 1
@@ -281,7 +307,38 @@ module SketchupCurrentViewCad
       end
     end
 
+    # SketchUp models with dense vegetation can contain the same definition
+    # millions of times. Build the light-mode representative list once per
+    # Entities collection, then reuse it for every rotated/transformed instance.
+    # This avoids repeatedly walking the complete Ruby collection merely to skip
+    # most of it.
+    def light_sampled_entities(entities, context)
+      cache = context[:light_entity_collections] ||= {}
+      key = entities.object_id
+      cached = cache[key]
+      return cached if cached
+
+      count = entities.respond_to?(:length) ? entities.length.to_i : 0
+      if count <= LIGHT_ENTITY_SAMPLES_PER_COLLECTION
+        selected = entities.to_a
+      else
+        selected = []
+        entities.each do |entity|
+          selected << entity
+          break if selected.length >= LIGHT_ENTITY_SAMPLES_PER_COLLECTION
+        end
+        context[:skipped_sampled] += [count - selected.length, 0].max
+      end
+      cache[key] = selected
+    end
+
     def block_candidate?(instance, world_transform, context)
+      if context[:quality] == 'light'
+        entity_count = instance.definition.entities.length.to_i
+        instance_count = instance.definition.instances.length
+        return true if instance_count > 1
+        return entity_count >= LIGHT_UNIQUE_COMPONENT_THRESHOLD
+      end
       return true if instance.is_a?(Sketchup::ComponentInstance) && !instance.is_a?(Sketchup::Group)
       return true if instance.definition.instances.length > 1
 
@@ -292,13 +349,30 @@ module SketchupCurrentViewCad
     end
 
     def emit_instance_block(instance, world_transform, outer_tag, outer_material, context)
+      light_mode = context[:quality] == 'light'
+      cache_key = if light_mode && !context[:section] && instance_fully_inside_view?(instance, world_transform, context)
+                    light_block_cache_key(instance, world_transform, outer_tag, outer_material)
+                  end
+      cached = cache_key && context[:light_block_cache][cache_key]
+      if cached
+        origin = project(Geom::Point3d.new(0, 0, 0).transform(world_transform), context[:basis])
+        insert = [
+          (cached[:insert][0] + origin[0] - cached[:origin][0]).round(4),
+          (cached[:insert][1] + origin[1] - cached[:origin][1]).round(4)
+        ]
+        depth = (cached[:depth] + origin[2] - cached[:origin][2]).round(4)
+        append_block_reference(context, instance, cached[:block], insert, depth)
+        context[:reused_block_references] += 1
+        return :emitted
+      end
+
       block_context = {
         model: context[:model],
         basis: context[:basis],
         viewport: context[:viewport],
         section: context[:section],
         ray_distance: context[:ray_distance],
-        occlusion: context[:occlusion],
+        occlusion: light_mode ? false : context[:occlusion],
         visibility_cache: context[:visibility_cache],
         depth_cache: context[:depth_cache],
         processed_curves: {},
@@ -308,6 +382,9 @@ module SketchupCurrentViewCad
         blocks: [],
         block_references: [],
         block_hashes: {},
+        light_block_cache: context[:light_block_cache],
+        light_entity_collections: context[:light_entity_collections],
+        light_material_cache: context[:light_material_cache],
         block_mode: false,
         emit_materials: context[:emit_materials],
         material_prefilter: true,
@@ -315,8 +392,13 @@ module SketchupCurrentViewCad
         quality: context[:quality],
         mm_per_pixel: context[:mm_per_pixel],
         cooperative: context[:cooperative],
+        light_sampling: light_mode,
+        light_entity_budget: light_mode ? { remaining: LIGHT_BLOCK_ENTITY_BUDGET } : nil,
+        light_budget_exhausted: false,
         skipped_hidden: 0,
         skipped_offscreen: 0,
+        skipped_sampled: 0,
+        reused_block_references: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -324,10 +406,33 @@ module SketchupCurrentViewCad
         section_lines: 0,
         silhouette_edges: 0
       }
-      walk_entities(instance.definition.entities, world_transform, outer_tag, outer_material, block_context)
+      proxy = light_mode && !context[:section] ?
+        light_dense_component_proxy(instance, world_transform, outer_tag, context) : nil
+      if proxy
+        block_context[:lines].concat(proxy[:lines])
+        material = outer_material || light_proxy_material(instance.definition, context)
+        if block_context[:emit_materials] && material
+          color = material.color
+          block_context[:fills] << {
+            materialName: material.display_name.to_s,
+            color: [color.red.to_i, color.green.to_i, color.blue.to_i],
+            alpha: material.respond_to?(:alpha) ? material.alpha.to_f.round(4) : 1.0,
+            paint: true,
+            layer: "MATERIAL_#{material.display_name}",
+            sourceLayer: outer_tag || tag_name(instance) || 'Untagged',
+            depth: proxy[:depth],
+            loops: [{ outer: true, points: proxy[:points] }]
+          }
+          block_context[:material_faces] += 1
+        end
+        block_context[:skipped_sampled] += instance.definition.entities.length.to_i
+      else
+        walk_entities(instance.definition.entities, world_transform, outer_tag, outer_material, block_context)
+      end
       if block_context[:lines].empty? && block_context[:curves].empty? && block_context[:fills].empty?
         context[:skipped_occluded] += block_context[:skipped_occluded]
         context[:skipped_offscreen] += block_context[:skipped_offscreen]
+        context[:skipped_sampled] += block_context[:skipped_sampled]
         context[:skipped_material_faces] += block_context[:skipped_material_faces]
         context[:ray_errors] += block_context[:ray_errors]
         return :occluded
@@ -355,18 +460,20 @@ module SketchupCurrentViewCad
         context[:block_hashes][geometry_hash] = block_name
       end
 
-      context[:block_references] << {
-        block: block_name,
-           insert: normalized[:insert],
-           depth: normalized[:depth],
-        layer: "BLOCK_#{source_name}",
-        sourceId: instance.persistent_id,
-        sourceName: instance.name.to_s.empty? ? instance.definition.name.to_s : instance.name.to_s
-      }
+      append_block_reference(context, instance, block_name, normalized[:insert], normalized[:depth])
+      if cache_key
+        context[:light_block_cache][cache_key] = {
+          block: block_name,
+          insert: normalized[:insert],
+          depth: normalized[:depth],
+          origin: project(Geom::Point3d.new(0, 0, 0).transform(world_transform), context[:basis])
+        }
+      end
       context[:section_lines] += block_context[:section_lines]
       context[:silhouette_edges] += block_context[:silhouette_edges]
       context[:skipped_hidden] += block_context[:skipped_hidden]
       context[:skipped_offscreen] += block_context[:skipped_offscreen]
+      context[:skipped_sampled] += block_context[:skipped_sampled]
       context[:skipped_occluded] += block_context[:skipped_occluded]
       context[:skipped_material_faces] += block_context[:skipped_material_faces]
       context[:material_faces] += block_context[:material_faces]
@@ -374,6 +481,123 @@ module SketchupCurrentViewCad
       :emitted
     rescue StandardError
       :fallback
+    end
+
+    def append_block_reference(context, instance, block_name, insert, depth)
+      source_name = instance.name.to_s.empty? ? instance.definition.name.to_s : instance.name.to_s
+      context[:block_references] << {
+        block: block_name,
+        insert: insert,
+        depth: depth,
+        layer: "BLOCK_#{source_name}",
+        sourceId: instance.persistent_id,
+        sourceName: source_name
+      }
+    end
+
+    def light_block_cache_key(instance, world_transform, outer_tag, outer_material)
+      linear = world_transform.to_a.each_with_index.map do |value, index|
+        index.between?(12, 14) ? 0.0 : value.to_f.round(6)
+      end
+      material_id = outer_material && outer_material.respond_to?(:persistent_id) ? outer_material.persistent_id : nil
+      [instance.definition.persistent_id, linear, outer_tag.to_s, material_id]
+    end
+
+    def instance_fully_inside_view?(instance, world_transform, context)
+      projected = bounds_corners(instance.definition.bounds).map do |point|
+        project(point.transform(world_transform), context[:basis])
+      end
+      viewport = context[:viewport]
+      projected.all? do |point|
+        point[0] >= viewport[:min_x] && point[0] <= viewport[:max_x] &&
+          point[1] >= viewport[:min_y] && point[1] <= viewport[:max_y]
+      end
+    rescue StandardError
+      false
+    end
+
+    # Dense repeated components (typically plants) are represented by a compact
+    # plan proxy in light mode. Traversing tens of thousands of leaves for every
+    # instance is both visually unnecessary at drawing scale and the main source
+    # of multi-million-entity exports.
+    def light_dense_component_proxy(instance, world_transform, outer_tag, context)
+      entities = instance.definition.entities
+      entity_count = entities.length.to_i
+      instance_count = instance.definition.instances.length
+      dense_repeated = instance_count > 1 && entity_count >= LIGHT_REPEATED_COMPONENT_THRESHOLD
+      dense_unique = entity_count >= LIGHT_UNIQUE_COMPONENT_THRESHOLD
+      return nil unless dense_repeated || dense_unique
+
+      projected = bounds_corners(instance.definition.bounds).map do |point|
+        project(point.transform(world_transform), context[:basis])
+      end
+      xs = projected.map { |point| point[0] }
+      ys = projected.map { |point| point[1] }
+      width = xs.max - xs.min
+      height = ys.max - ys.min
+      return nil if width <= 0.1 || height <= 0.1
+
+      center_x = (xs.min + xs.max) * 0.5
+      center_y = (ys.min + ys.max) * 0.5
+      depth = projected.map { |point| point[2] }.min
+      layer = outer_tag || tag_name(instance) || 'Untagged'
+      points = if [width, height].max / [width, height].min > 3.0
+                 [
+                   [xs.min, ys.min, depth],
+                   [xs.max, ys.min, depth],
+                   [xs.max, ys.max, depth],
+                   [xs.min, ys.max, depth]
+                 ]
+               else
+                 radius = projected.map do |point|
+                   Math.sqrt((point[0] - center_x)**2 + (point[1] - center_y)**2)
+                 end.max
+                 LIGHT_PROXY_SEGMENTS.times.map do |index|
+                   angle = 2.0 * Math::PI * index / LIGHT_PROXY_SEGMENTS
+                   [
+                     (center_x + radius * Math.cos(angle)).round(4),
+                     (center_y + radius * Math.sin(angle)).round(4),
+                     depth
+                   ]
+                 end
+               end
+      points = clip_projected_polygon(points, context[:viewport])
+      return nil if points.length < 3
+      lines = points.each_with_index.map do |point, index|
+        { start: point, end: points[(index + 1) % points.length], layer: layer, proxy: true }
+      end
+      { lines: lines, points: points, depth: depth }
+    rescue StandardError
+      nil
+    end
+
+    def light_proxy_material(definition, context)
+      cache = context[:light_material_cache] ||= {}
+      key = definition.persistent_id
+      return cache[key] if cache.key?(key)
+
+      material = search_light_proxy_material(definition.entities)
+      cache[key] = material
+    rescue StandardError
+      nil
+    end
+
+    def search_light_proxy_material(entities, limit = 128, depth = 0)
+      checked = 0
+      entities.each do |entity|
+        checked += 1
+        material = entity.respond_to?(:material) ? entity.material : nil
+        material ||= entity.back_material if entity.respond_to?(:back_material)
+        return material if material
+        if depth < 2 && (entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance))
+          nested = search_light_proxy_material(entity.definition.entities, [limit / 2, 16].max, depth + 1)
+          return nested if nested
+        end
+        break if checked >= limit
+      end
+      nil
+    rescue StandardError
+      nil
     end
 
     def instance_intersects_view?(instance, world_transform, context)

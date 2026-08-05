@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import threading
+import time
 import traceback
 import tkinter as tk
 import tkinter.font as tkfont
@@ -103,6 +104,7 @@ class SU2CADApp:
         self.last_progress_message = ""
         self.last_log_message = ""
         self.log_line_count = 0
+        self.export_started_at: float | None = None
         self.settings_detail_labels: list[ctk.CTkLabel] = []
         self.settings_path = Path(os.environ.get("APPDATA", str(Path.home()))) / "SU2CAD" / "settings.json"
         self.saved = self._load_settings()
@@ -125,6 +127,7 @@ class SU2CADApp:
         self.open_cad_var = tk.BooleanVar(value=bool(self.saved.get("open_in_cad", True)))
         self.model_var = tk.StringVar(value="正在检测 SketchUp")
         self.phase_var = tk.StringVar(value="等待任务")
+        self.elapsed_var = tk.StringVar(value="总耗时 --")
         self.result_title_var = tk.StringVar(value="准备生成 CAD")
         self.result_detail_var = tk.StringVar(value="连接 SketchUp 后即可导出当前视图")
 
@@ -136,6 +139,7 @@ class SU2CADApp:
         self.root.after(200, self._refresh_status)
         self.root.after(0, lambda: self._apply_responsive_layout(self.root.winfo_width()))
         self.root.after(250, self._update_settings_scrollbar_visibility)
+        self.root.after(1000, self._tick_elapsed)
         self._log(f"SU2CAD {APP_VERSION} 已启动")
 
     @staticmethod
@@ -461,12 +465,15 @@ class SU2CADApp:
 
         phase = ctk.CTkFrame(tab, fg_color="transparent")
         phase.grid(row=1, column=0, padx=8, sticky="ew")
-        phase.grid_columnconfigure(0, weight=1)
+        phase.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(phase, text="任务进度", text_color=TEXT, font=self._font(11, "bold")).grid(
             row=0, column=0, sticky="w"
         )
+        ctk.CTkLabel(phase, textvariable=self.elapsed_var, text_color=PRIMARY, font=self._font(10, "bold")).grid(
+            row=0, column=1, padx=(16, 12), sticky="w"
+        )
         ctk.CTkLabel(phase, textvariable=self.phase_var, text_color=MUTED, font=self._font(10)).grid(
-            row=0, column=1, sticky="e"
+            row=0, column=2, sticky="e"
         )
         self.progress = ctk.CTkProgressBar(tab, height=9, corner_radius=5, progress_color=PRIMARY, fg_color=BORDER)
         self.progress.grid(row=2, column=0, padx=8, pady=(8, 18), sticky="ew")
@@ -725,10 +732,7 @@ class SU2CADApp:
         try:
             max_block_lines = max(0, int(self.max_lines_var.get().strip()))
         except (TypeError, ValueError, tk.TclError):
-            try:
-                max_block_lines = max(0, int(self.saved.get("max_block_lines", 2500)))
-            except (TypeError, ValueError):
-                max_block_lines = 2500
+            max_block_lines = 2500
         data = {
             "output_directory": self.output_var.get(),
             "paper_size": self.paper_var.get(),
@@ -789,6 +793,8 @@ class SU2CADApp:
         self.last_progress_message = ""
         self.progress.set(0)
         self.phase_var.set("正在启动")
+        self.export_started_at = time.perf_counter()
+        self.elapsed_var.set("已用时 00:00")
         self._set_state("处理中", WARNING, WARNING_SOFT)
         self.result_title_var.set("正在读取当前视图")
         self.result_detail_var.set("SketchUp 大模型可能需要数分钟，请保持模型窗口打开")
@@ -842,6 +848,26 @@ class SU2CADApp:
         self.cancel_button.configure(state="normal")
         self.export_button.configure(state="normal" if self.sketchup_connected else "disabled")
 
+    @staticmethod
+    def _format_elapsed(seconds: float) -> str:
+        total = max(0, int(round(seconds)))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+    def _finish_elapsed(self, seconds: float | None = None) -> float:
+        if seconds is None:
+            seconds = time.perf_counter() - self.export_started_at if self.export_started_at is not None else 0.0
+        self.export_started_at = None
+        self.elapsed_var.set(f"总耗时 {self._format_elapsed(seconds)}")
+        return seconds
+
+    def _tick_elapsed(self) -> None:
+        if self.export_started_at is not None:
+            seconds = time.perf_counter() - self.export_started_at
+            self.elapsed_var.set(f"已用时 {self._format_elapsed(seconds)}")
+        self.root.after(1000, self._tick_elapsed)
+
     def _set_state(self, text: str, color: str, soft_color: str) -> None:
         self.state_badge.configure(text=text, text_color=color, fg_color=soft_color)
 
@@ -866,13 +892,15 @@ class SU2CADApp:
                     result = payload
                     assert isinstance(result, ExportResult)
                     self.last_result = result
+                    self._finish_elapsed(result.elapsed_seconds)
                     self._add_recent(result)
                     self._set_idle()
                     self._set_state("已完成", SUCCESS, SUCCESS_SOFT)
                     self.result_title_var.set(f"{result.layout}  {result.scale}")
                     detail = (
                         f"{result.material_count} 种材质，{result.material_hatches} 个色块，"
-                        f"{result.block_references} 个块参照，审计错误 {result.audit_errors}"
+                        f"{result.block_references} 个块参照，审计错误 {result.audit_errors}，"
+                        f"总耗时 {self._format_elapsed(result.elapsed_seconds)}"
                     )
                     if result.warnings:
                         detail = f"{detail} · {result.warnings[0]}"
@@ -882,6 +910,7 @@ class SU2CADApp:
                     self.tabs.set("当前任务")
                     self._log(f"完成：{result.dxf}")
                 elif event == "cancelled":
+                    self._finish_elapsed()
                     self.phase_var.set("已取消")
                     self._set_idle()
                     self._set_state("已取消", MUTED, SURFACE_ALT)
@@ -889,6 +918,7 @@ class SU2CADApp:
                     self.result_detail_var.set(str(payload))
                     self._log(str(payload))
                 elif event == "error":
+                    self._finish_elapsed()
                     message, details = payload  # type: ignore[misc]
                     self.phase_var.set("导出失败")
                     self._set_idle()

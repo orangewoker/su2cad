@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.4.0"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -77,6 +78,7 @@ class ExportResult:
     audit_errors: int
     opened_in_cad: bool
     warnings: tuple[str, ...] = ()
+    elapsed_seconds: float = 0.0
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -288,7 +290,8 @@ def _extract_geometry_chunked(
                 # Entity totals are not known without another expensive full traversal.
                 # Keep extraction progress bounded and report the real processed count.
                 estimated = min(58, 12 + int(46 * processed / (processed + 12_000)))
-                progress(estimated, f"正在提取当前视图几何 · 已处理 {processed:,} 个实体")
+                entity_label = "代表实体" if quality == "light" else "实体"
+                progress(estimated, f"正在提取当前视图几何 · 已计算 {processed:,} 个{entity_label}")
                 last_reported = processed
             if step.get("done"):
                 result = step.get("result")
@@ -321,6 +324,7 @@ def export_current_view(
     progress: ProgressCallback,
     is_cancelled: CancelCallback,
 ) -> ExportResult:
+    started_at = time.perf_counter()
     progress(3, "正在连接 SketchUp")
     health = bridge_health()
     if not health.get("ok") or not health.get("running"):
@@ -418,4 +422,5 @@ def export_current_view(
         audit_errors=int(builder_result["auditErrors"]),
         opened_in_cad=opened,
         warnings=tuple(warnings),
+        elapsed_seconds=round(time.perf_counter() - started_at, 2),
     )

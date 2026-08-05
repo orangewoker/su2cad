@@ -47,6 +47,7 @@ class AppWorkflowTests(unittest.TestCase):
                 block_lines_after=20,
                 audit_errors=0,
                 opened_in_cad=False,
+                elapsed_seconds=65.2,
             )
 
             def fake_export(_settings, progress, _cancelled):
@@ -67,6 +68,8 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertEqual(app.last_result, result)
             self.assertEqual(app.result_title_var.get(), "A4-L  1:100")
             self.assertIn("2 种材质", app.result_detail_var.get())
+            self.assertIn("总耗时 01:05", app.result_detail_var.get())
+            self.assertEqual(app.elapsed_var.get(), "总耗时 01:05")
             app.max_lines_var.set("")
             app._save_settings()
             saved = app._load_settings()
