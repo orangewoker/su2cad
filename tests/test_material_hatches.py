@@ -22,6 +22,7 @@ from build_dxf import (  # noqa: E402
     expanded_fills,
     geometry_vertex_count,
     visible_material_geometry,
+    visible_material_geometry_fast,
 )
 
 
@@ -117,6 +118,37 @@ class MaterialHatchTests(unittest.TestCase):
         self.assertEqual(len(visible), 1)
         self.assertAlmostEqual(visible[0].geometry.area, 55.0, places=4)
         self.assertAlmostEqual(visible[0].geometry.bounds[0], 4.5, places=4)
+
+    def test_balanced_fast_material_painter_masks_far_face(self) -> None:
+        payload = self.base_payload()
+        payload["fills"] = [
+            {
+                "materialName": "Far",
+                "color": [220, 40, 40],
+                "alpha": 1.0,
+                "paint": True,
+                "layer": "MATERIAL_Far",
+                "depth": 0,
+                "loops": [
+                    {"outer": True, "points": [[0, 0, 0], [100, 0, 0], [100, 100, 0], [0, 100, 0]]}
+                ],
+            },
+            {
+                "materialName": None,
+                "color": None,
+                "alpha": 1.0,
+                "paint": False,
+                "layer": "SUCAD-OCCLUDER",
+                "depth": 10,
+                "loops": [
+                    {"outer": True, "points": [[25, 25, 10], [75, 25, 10], [75, 75, 10], [25, 75, 10]]}
+                ],
+            },
+        ]
+        visible, occluders = visible_material_geometry_fast(expanded_fills(payload), batch_size=16)
+        self.assertEqual(occluders, 2)
+        self.assertEqual(len(visible), 1)
+        self.assertAlmostEqual(visible[0].geometry.area, 7500.0, places=4)
 
     def test_transparent_material_is_written_after_opaque_background(self) -> None:
         payload = self.base_payload()

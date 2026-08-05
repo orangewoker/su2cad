@@ -34,9 +34,15 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Cull component and group bounds against the active viewport and section plane before traversing their definitions.
 - Sample line visibility in screen space according to the selected quality profile, cap samples per segment, and reuse nearest-hit depth by screen tile.
 - In the desktop app, run SketchUp extraction as short resumable steps so progress and cancellation remain responsive and one long HTTP request cannot time out the whole scene.
+- Before extraction, report a fast source-entity census, an instance-expanded estimate, and the planned current-view representative count. Keep these totals visible in the desktop task area.
 - In Light quality, never expand millions of repeated component entities. Cache bounded real geometry per definition and reuse it through CAD INSERT rotation, mirroring, and scaling; do not invent bounding-polygon proxy blocks.
 - In Light quality, distribute a block's traversal budget across child instances by projected footprint. Always reserve enough geometry for large furniture bodies before spending detail on tiny high-poly wheels, screws, tufting, and decorations.
 - In Balanced quality, reuse fully visible planar block definitions and apply a 40,000-entity block budget plus a 24,000-entity collection sample limit. Reserve unbounded per-edge occlusion for Precise quality so repeated furniture does not expand into millions of duplicate operations.
+- Sample oversized SketchUp `Entities` collections with deterministic evenly spaced indexes rather than their first N members so geometry stored late in imported definitions is not erased.
+- In Balanced quality, order root geometry as primitives, complete simple blocks, planar outline/text blocks, then dense blocks from largest projected footprint to smallest.
+- Preserve planar lettering and logos up to a bounded 150,000 recursively expanded entities as complete outline geometry with mesh-seam cleanup.
+- Use 72/105/135-second Balanced extraction stages: normal dense detail, compact real-geometry outlines, then stop only the remaining smallest uncached dense objects. Never apply this deadline degradation to simple or protected outline blocks.
+- Reuse already generated block definitions even after a time threshold, including section views when an instance lies wholly on the kept side of the cut plane.
 - Before expanding a block, classify it by recursively bounded definition complexity. In Balanced quality, preserve blocks at or below 6,000 expanded entities without collection sampling, mesh cleanup, or a per-block entity budget.
 - Repeat that classification at every nested child. A dense wrapper must not spend or sample away a simple child; mark child linework as full fidelity and exempt it from downstream dense-block line caps.
 - Apply exact per-edge visibility clipping to full-fidelity simple blocks. Use projected multi-point bounds testing to discard a fully covered block before traversal, and use bounded coarse clipping only for partially covered dense blocks.
@@ -58,6 +64,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Resolve projected material visibility with per-face depth planes so sloped and crossing surfaces are clipped at their actual depth boundary.
 - Draw opaque material regions before transparent regions and order transparent regions from far to near.
 - Dissolve and topology-preserving-simplify material boundaries before writing HATCH entities; keep plant HATCH entities on `SU-PLANTS-BLOCKS`.
+- For Light and Balanced scenes with hundreds of material faces, compose opaque coverage in bounded front-to-back batches. Keep exact sloped-plane pairwise clipping for Precise quality.
 
 ## Drawing Rules
 

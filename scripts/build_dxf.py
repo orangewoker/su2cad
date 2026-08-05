@@ -572,15 +572,39 @@ def clip_ring_to_positive_half_plane(
 
 
 def closer_overlap(target: ProjectedFill, candidate: ProjectedFill) -> BaseGeometry:
+    a = candidate.depth_plane[0] - target.depth_plane[0]
+    b = candidate.depth_plane[1] - target.depth_plane[1]
+    c = candidate.depth_plane[2] - target.depth_plane[2] - DEPTH_TOLERANCE_MM
+    target_bounds = target.geometry.bounds
+    candidate_bounds = candidate.geometry.bounds
+    min_x = max(target_bounds[0], candidate_bounds[0])
+    min_y = max(target_bounds[1], candidate_bounds[1])
+    max_x = min(target_bounds[2], candidate_bounds[2])
+    max_y = min(target_bounds[3], candidate_bounds[3])
+    if min_x > max_x or min_y > max_y:
+        return GeometryCollection()
+
+    depth_values = (
+        (a * min_x) + (b * min_y) + c,
+        (a * max_x) + (b * min_y) + c,
+        (a * max_x) + (b * max_y) + c,
+        (a * min_x) + (b * max_y) + c,
+    )
+    # Reject behind/coplanar candidates before invoking an expensive GEOS
+    # intersection. On large architectural scenes this removes millions of
+    # duplicate polygon intersections while preserving the same depth result.
+    if max(depth_values) <= 0.0:
+        return GeometryCollection()
+
     overlap = target.geometry.intersection(candidate.geometry)
     if overlap.is_empty or overlap.area < MIN_HATCH_AREA_MM2:
         return GeometryCollection()
 
-    a = candidate.depth_plane[0] - target.depth_plane[0]
-    b = candidate.depth_plane[1] - target.depth_plane[1]
-    c = candidate.depth_plane[2] - target.depth_plane[2] - DEPTH_TOLERANCE_MM
     if abs(a) < 1.0e-12 and abs(b) < 1.0e-12:
-        return overlap if c > 0.0 else GeometryCollection()
+        return overlap
+
+    if min(depth_values) > 0.0:
+        return overlap
 
     min_x, min_y, max_x, max_y = overlap.bounds
     margin = max(max_x - min_x, max_y - min_y, 1.0) + 1.0
@@ -611,7 +635,10 @@ def visible_material_geometry(records: list[ProjectedFill]) -> tuple[list[Projec
         if not record.paint or not record.color or record.alpha <= 0.01:
             continue
         masks = []
-        for tree_index in tree.query(record.geometry, predicate="intersects"):
+        # A bounding-box query is intentionally cheaper here. closer_overlap()
+        # rejects candidates by their depth plane before doing the exact
+        # intersection, avoiding a second GEOS intersection for every record.
+        for tree_index in tree.query(record.geometry):
             candidate_index, candidate = opaque[int(tree_index)]
             if candidate_index == index:
                 continue
@@ -635,6 +662,85 @@ def visible_material_geometry(records: list[ProjectedFill]) -> tuple[list[Projec
                 )
             )
     return visible_records, len(opaque)
+
+
+def visible_material_geometry_fast(
+    records: list[ProjectedFill],
+    batch_size: int = 64,
+) -> tuple[list[ProjectedFill], int]:
+    """Resolve large-scene materials with a batched front-to-back painter.
+
+    Balanced and Light already use sampled SketchUp geometry. Performing an
+    exact all-pairs sloped-plane comparison afterward is disproportionate: one
+    large floor can intersect thousands of small furniture faces. Sorting by
+    representative depth and merging opaque coverage in bounded batches keeps
+    the visible vector regions while making the operation near-linear.
+    Precise quality continues to use visible_material_geometry().
+    """
+    opaque_count = sum(1 for record in records if not record.paint or record.alpha >= 0.98)
+    ordered = sorted(records, key=lambda record: record.depth, reverse=True)
+    coverage: BaseGeometry = GeometryCollection()
+    visible_records: list[ProjectedFill] = []
+    batch_size = max(16, int(batch_size))
+
+    for start in range(0, len(ordered), batch_size):
+        batch = ordered[start:start + batch_size]
+        batch_opaque: list[BaseGeometry] = []
+        batch_opaque_depths: list[float] = []
+        for record in batch:
+            visible = record.geometry
+            if not coverage.is_empty:
+                visible = visible.difference(coverage)
+            # Keep front-to-back ordering inside the current union batch. This
+            # costs at most a few dozen bounding-box checks per face and avoids
+            # leaking hidden colours between adjacent records in the batch.
+            if not visible.is_empty:
+                record_bounds = record.geometry.bounds
+                for candidate, candidate_depth in zip(batch_opaque, batch_opaque_depths):
+                    if candidate_depth <= record.depth + DEPTH_TOLERANCE_MM:
+                        continue
+                    candidate_bounds = candidate.bounds
+                    if (
+                        candidate_bounds[2] < record_bounds[0]
+                        or candidate_bounds[0] > record_bounds[2]
+                        or candidate_bounds[3] < record_bounds[1]
+                        or candidate_bounds[1] > record_bounds[3]
+                    ):
+                        continue
+                    visible = visible.difference(candidate)
+                    if visible.is_empty:
+                        break
+            if (
+                record.paint
+                and record.color
+                and record.alpha > 0.01
+                and not visible.is_empty
+                and visible.area >= MIN_HATCH_AREA_MM2
+            ):
+                visible_records.append(
+                    ProjectedFill(
+                        geometry=visible,
+                        depth=record.depth,
+                        depth_plane=record.depth_plane,
+                        paint=True,
+                        layer=record.layer,
+                        color=record.color,
+                        alpha=record.alpha,
+                        material_name=record.material_name,
+                    )
+                )
+            if not record.paint or record.alpha >= 0.98:
+                batch_opaque.append(record.geometry)
+                batch_opaque_depths.append(record.depth)
+
+        if batch_opaque:
+            if coverage.is_empty:
+                coverage = unary_union(batch_opaque)
+            else:
+                coverage = unary_union([coverage, *batch_opaque])
+            if not coverage.is_valid:
+                coverage = make_valid(coverage)
+    return visible_records, opaque_count
 
 
 def geometry_vertex_count(geometry: BaseGeometry, min_area: float) -> int:
@@ -757,11 +863,18 @@ def add_hatch_group(
     return extent_points, hatch_count
 
 
-def add_material_hatches(layout, records: list[ProjectedFill]) -> tuple[list[tuple[float, float]], int, int, int]:
+def add_material_hatches(
+    layout,
+    records: list[ProjectedFill],
+    quality: str = "precise",
+) -> tuple[list[tuple[float, float]], int, int, int]:
     if not records:
         return [], 0, 0, 0
 
-    visible_records, occluder_count = visible_material_geometry(records)
+    if quality in {"light", "balanced"} and len(records) >= 500:
+        visible_records, occluder_count = visible_material_geometry_fast(records)
+    else:
+        visible_records, occluder_count = visible_material_geometry(records)
     opaque_groups: dict[tuple, list[BaseGeometry]] = {}
     transparent_groups: dict[tuple, list[BaseGeometry]] = {}
     material_keys = set()
@@ -1029,7 +1142,12 @@ def build(
         if name not in doc.layers:
             doc.layers.add(name, color=7, lineweight=18)
 
-    extent_points, material_hatches, material_count, occluder_faces = add_material_hatches(msp, fill_records)
+    quality = str(payload.get("stats", {}).get("quality") or "precise").lower()
+    extent_points, material_hatches, material_count, occluder_faces = add_material_hatches(
+        msp,
+        fill_records,
+        quality=quality,
+    )
     for segment in merged:
         msp.add_line(segment.start, segment.end, dxfattribs={"layer": segment.layer})
         extent_points.extend((segment.start, segment.end))

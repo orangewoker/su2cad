@@ -15,7 +15,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.5.7"
+APP_VERSION = "0.6.0"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -82,6 +82,11 @@ class ExportResult:
     full_fidelity_blocks: int = 0
     optimized_dense_blocks: int = 0
     occluded_blocks: int = 0
+    unique_entities: int = 0
+    expanded_entities: int = 0
+    planned_entities: int = 0
+    time_budget_skipped: int = 0
+    time_budget_omitted: int = 0
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -260,8 +265,10 @@ def _extract_geometry_chunked(
     settings: ExportSettings,
     progress: ProgressCallback,
     is_cancelled: CancelCallback,
+    workload: dict | None = None,
 ) -> dict:
     quality = settings.quality if settings.quality in {"light", "balanced", "precise"} else "balanced"
+    extraction_started = time.perf_counter()
     start_code = (
         f"load('{_ruby_literal(str(ruby_exporter))}'); "
         "result = SketchupCurrentViewCad.start_export("
@@ -290,11 +297,21 @@ def _extract_geometry_chunked(
             step = _run_ruby_json(step_code, ruby_exporter, token, timeout=30)
             processed = max(0, int(step.get("processedEntities") or 0))
             if processed != last_reported:
-                # Entity totals are not known without another expensive full traversal.
-                # Keep extraction progress bounded and report the real processed count.
-                estimated = min(58, 12 + int(46 * processed / (processed + 12_000)))
+                planned = max(0, int((workload or {}).get("plannedEntities") or 0))
+                if planned:
+                    ratio = min(processed / planned, 0.99)
+                    entity_progress = 12 + int(46 * ratio)
+                    if quality in {"light", "balanced"}:
+                        target_seconds = 110.0 if quality == "balanced" else 85.0
+                        time_ratio = min((time.perf_counter() - extraction_started) / target_seconds, 0.98)
+                        entity_progress = max(entity_progress, 12 + int(46 * time_ratio))
+                    estimated = min(58, entity_progress)
+                    count_label = f"{processed:,} / {planned:,}"
+                else:
+                    estimated = min(58, 12 + int(46 * processed / (processed + 12_000)))
+                    count_label = f"{processed:,}"
                 entity_label = "代表实体" if quality in {"light", "balanced"} else "实体"
-                progress(estimated, f"正在提取当前视图几何 · 已计算 {processed:,} 个{entity_label}")
+                progress(estimated, f"正在提取当前视图几何 · 已计算 {count_label} 个{entity_label}")
                 last_reported = processed
             if step.get("done"):
                 result = step.get("result")
@@ -302,6 +319,15 @@ def _extract_geometry_chunked(
     except Exception:
         _abort_bridge_export(session_id, ruby_exporter, token)
         raise
+
+
+def _preflight_workload(ruby_exporter: Path, token: str, quality: str) -> dict:
+    code = (
+        f"load('{_ruby_literal(str(ruby_exporter))}'); "
+        f"result = SketchupCurrentViewCad.workload_summary(quality: '{quality}'); "
+        "puts JSON.generate(result); result"
+    )
+    return _run_ruby_json(code, ruby_exporter, token, timeout=30)
 
 
 def _linework_fallback_json(source: Path) -> Path:
@@ -349,6 +375,19 @@ def export_current_view(
     if not ruby_exporter.exists():
         raise FileNotFoundError(f"缺少导出器：{ruby_exporter}")
 
+    progress(6, "正在统计模型实体")
+    workload = _preflight_workload(ruby_exporter, token, settings.quality)
+    unique_entities = int(workload.get("uniqueEntities") or 0)
+    expanded_entities = int(workload.get("expandedEstimate") or 0)
+    planned_entities = int(workload.get("plannedEntities") or 0)
+    progress(
+        10,
+        (
+            f"模型总实体 {unique_entities:,} · "
+            f"展开估算 {expanded_entities:,} · "
+            f"当前视图计划 {planned_entities:,}"
+        ),
+    )
     progress(12, "正在提取当前视图几何")
     extraction_result = _extract_geometry_chunked(
         json_path,
@@ -357,6 +396,7 @@ def export_current_view(
         settings,
         progress,
         is_cancelled,
+        workload,
     )
     if not json_path.exists() or json_path.stat().st_size == 0:
         raise RuntimeError("SketchUp 未生成有效线稿 JSON")
@@ -367,6 +407,18 @@ def export_current_view(
     ray_errors = int(extraction_result.get("rayErrors") or 0)
     if ray_errors:
         warnings.append(f"{ray_errors} 个遮挡采样点异常，已保守保留对应几何")
+    time_budget_skipped = int(extraction_result.get("skippedTimeBudget") or 0)
+    if time_budget_skipped:
+        warnings.append(
+            f"为控制平衡模式耗时，已在完整保留简单对象后对 "
+            f"{time_budget_skipped} 个高密度对象使用紧凑轮廓"
+        )
+    time_budget_omitted = int(extraction_result.get("omittedTimeBudget") or 0)
+    if time_budget_omitted:
+        warnings.append(
+            f"达到平衡模式总时限后，已停止处理最后 "
+            f"{time_budget_omitted} 个最小高密度对象"
+        )
     build_json_path = json_path
     try:
         builder_result = build_dxf(
@@ -432,4 +484,9 @@ def export_current_view(
         ),
         optimized_dense_blocks=int(extraction_result.get("optimizedDenseBlocks") or 0),
         occluded_blocks=int(extraction_result.get("occludedBlocks") or 0),
+        unique_entities=unique_entities,
+        expanded_entities=expanded_entities,
+        planned_entities=planned_entities,
+        time_budget_skipped=time_budget_skipped,
+        time_budget_omitted=time_budget_omitted,
     )

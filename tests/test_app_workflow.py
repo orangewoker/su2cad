@@ -51,6 +51,9 @@ class AppWorkflowTests(unittest.TestCase):
                 full_fidelity_blocks=12,
                 optimized_dense_blocks=3,
                 occluded_blocks=5,
+                unique_entities=8_143_295,
+                expanded_entities=11_417_247,
+                planned_entities=4_641_683,
             )
 
             def fake_export(_settings, progress, _cancelled):
@@ -75,6 +78,10 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertIn("遮挡剔除 5", app.result_detail_var.get())
             self.assertIn("总耗时 01:05", app.result_detail_var.get())
             self.assertEqual(app.elapsed_var.get(), "总耗时 01:05")
+            self.assertEqual(
+                app.entity_total_var.get(),
+                "模型总实体 8,143,295 · 展开估算 11,417,247 · 当前视图计划 4,641,683",
+            )
             app.max_lines_var.set("")
             app._save_settings()
             saved = app._load_settings()

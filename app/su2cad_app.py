@@ -145,6 +145,7 @@ class SU2CADApp:
         self.model_var = tk.StringVar(value="正在检测 SketchUp")
         self.phase_var = tk.StringVar(value="等待任务")
         self.elapsed_var = tk.StringVar(value="总耗时 --")
+        self.entity_total_var = tk.StringVar(value="模型总实体 -- · 展开估算 -- · 当前视图计划 --")
         self.result_title_var = tk.StringVar(value="准备生成 CAD")
         self.result_detail_var = tk.StringVar(value="连接 SketchUp 后即可导出当前视图")
 
@@ -568,6 +569,14 @@ class SU2CADApp:
         ctk.CTkLabel(phase, textvariable=self.phase_var, text_color=MUTED, font=self._font(10)).grid(
             row=0, column=2, sticky="e"
         )
+        self.entity_total_label = ctk.CTkLabel(
+            phase,
+            textvariable=self.entity_total_var,
+            text_color=MUTED,
+            font=self._font(9),
+            justify="left",
+        )
+        self.entity_total_label.grid(row=1, column=0, columnspan=3, pady=(5, 0), sticky="w")
         self.progress = ctk.CTkProgressBar(tab, height=9, corner_radius=5, progress_color=PRIMARY, fg_color=BORDER)
         self.progress.grid(row=2, column=0, padx=8, pady=(8, 18), sticky="ew")
         self.progress.set(0)
@@ -771,6 +780,7 @@ class SU2CADApp:
         compact = width < COMPACT_BREAKPOINT
         available_detail_width = max(260, width - (110 if compact else 520))
         self.result_detail_label.configure(wraplength=available_detail_width)
+        self.entity_total_label.configure(wraplength=available_detail_width)
         settings_wrap = min(max(220, width - 100), 620) if compact else 280
         for label in self.settings_detail_labels:
             label.configure(wraplength=settings_wrap)
@@ -909,6 +919,7 @@ class SU2CADApp:
         self.last_progress_message = ""
         self.progress.set(0)
         self.phase_var.set("正在启动")
+        self.entity_total_var.set("模型总实体 -- · 展开估算 -- · 当前视图计划 --")
         self.export_started_at = time.perf_counter()
         self.elapsed_var.set("已用时 00:00")
         self._set_state("处理中", WARNING, WARNING_SOFT)
@@ -1002,6 +1013,8 @@ class SU2CADApp:
                         self.last_progress_value = numeric_value
                     if text_message != self.last_progress_message:
                         self.phase_var.set(text_message)
+                        if text_message.startswith("模型总实体 "):
+                            self.entity_total_var.set(text_message)
                         self._log(text_message)
                         self.last_progress_message = text_message
                 elif event == "success":
@@ -1024,6 +1037,11 @@ class SU2CADApp:
                         f"遮挡剔除 {result.occluded_blocks}"
                     )
                     detail = f"{detail} · {fidelity}"
+                    self.entity_total_var.set(
+                        f"模型总实体 {result.unique_entities:,} · "
+                        f"展开估算 {result.expanded_entities:,} · "
+                        f"当前视图计划 {result.planned_entities:,}"
+                    )
                     if result.warnings:
                         detail = f"{detail} · {result.warnings[0]}"
                         self._log(result.warnings[0])

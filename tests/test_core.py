@@ -119,10 +119,22 @@ class CoreTests(unittest.TestCase):
                     settings,
                     lambda value, message: progress_events.append((value, message)),
                     lambda: False,
+                    {"plannedEntities": 5000},
                 )
             self.assertEqual(run.call_count, 3)
             self.assertIn("quality: 'light'", run.call_args_list[0].args[0])
-            self.assertIn("3,000", progress_events[-1][1])
+            self.assertIn("3,000 / 5,000", progress_events[-1][1])
+
+    def test_fast_workload_preflight_calls_ruby_census(self) -> None:
+        expected = {
+            "uniqueEntities": 8_000_000,
+            "expandedEstimate": 11_000_000,
+            "plannedEntities": 4_000_000,
+        }
+        with patch("core._run_ruby_json", return_value=expected) as run:
+            result = core._preflight_workload(Path("export_current_view.rb"), "token", "balanced")
+        self.assertEqual(result, expected)
+        self.assertIn("workload_summary(quality: 'balanced')", run.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -62,6 +62,12 @@ module SketchupCurrentViewCad
       section = active_section(model, camera)
       effective_occlusion = section ? strict_section_occlusion : occlusion
       diagonal = [model.bounds.diagonal.to_f, 1000.0].max
+      export_started = monotonic_time
+      # Leave enough of the three-minute Balanced target for material
+      # composition, DXF serialization and audit outside SketchUp.
+      dense_soft_seconds = quality.to_s == 'balanced' ? 72.0 : 55.0
+      dense_hard_seconds = quality.to_s == 'balanced' ? 105.0 : 80.0
+      dense_stop_seconds = quality.to_s == 'balanced' ? 135.0 : 100.0
       context = {
         model: model,
         basis: basis,
@@ -84,14 +90,20 @@ module SketchupCurrentViewCad
         light_entity_collections: {},
         definition_complexity_cache: {},
         block_mode: true,
+        root_priority: true,
         emit_materials: materials,
         material_prefilter: true,
         profile: profile,
         quality: quality.to_s,
         mm_per_pixel: [mm_per_pixel, 1.0e-6].max,
         cooperative: cooperative,
+        export_started: export_started,
+        dense_soft_deadline: quality.to_s == 'precise' ? nil : export_started + dense_soft_seconds,
+        dense_hard_deadline: quality.to_s == 'precise' ? nil : export_started + dense_hard_seconds,
+        dense_stop_deadline: quality.to_s == 'precise' ? nil : export_started + dense_stop_seconds,
         fidelity: 'full',
         light_sampling: false,
+        time_compact: false,
         light_entity_budget: nil,
         skipped_hidden: 0,
         skipped_offscreen: 0,
@@ -101,6 +113,8 @@ module SketchupCurrentViewCad
         full_fidelity_children: 0,
         optimized_dense_blocks: 0,
         occluded_blocks: 0,
+        skipped_time_budget: 0,
+        omitted_time_budget: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -163,6 +177,9 @@ module SketchupCurrentViewCad
           fullFidelityChildren: context[:full_fidelity_children],
           optimizedDenseBlocks: context[:optimized_dense_blocks],
           occludedBlocks: context[:occluded_blocks],
+          skippedTimeBudget: context[:skipped_time_budget],
+          omittedTimeBudget: context[:omitted_time_budget],
+          extractionSeconds: (monotonic_time - export_started).round(2),
           occlusion: effective_occlusion,
           requestedOcclusion: occlusion,
           strictSectionOcclusion: strict_section_occlusion,
@@ -263,6 +280,78 @@ module SketchupCurrentViewCad
       QUALITY_PROFILES.fetch(quality.to_s, QUALITY_PROFILES['balanced'])
     end
 
+    # Return a fast model census without expanding repeated component geometry.
+    # uniqueEntities is exact for source collections; expandedEstimate is a
+    # deliberately labelled estimate because nested definitions multiply when
+    # their parents are instanced.
+    def workload_summary(quality: 'balanced')
+      model = Sketchup.active_model
+      raise 'No active SketchUp model' unless model
+
+      definitions = model.definitions.to_a.select { |definition| definition.respond_to?(:entities) }
+      root_entities = model.entities.length.to_i
+      definition_entities = definitions.sum { |definition| definition.entities.length.to_i }
+      definition_instances = definitions.sum { |definition| definition.instances.length.to_i }
+      expanded_estimate = root_entities + definitions.sum do |definition|
+        count = definition.instances.length.to_i
+        count.positive? ? definition.entities.length.to_i * count : 0
+      end
+
+      camera = model.active_view.camera
+      basis = camera_basis(camera)
+      viewport = viewport_bounds(model.active_view, camera)
+      profile = quality_profile(quality)
+      viewport_width_mm = viewport[:max_x] - viewport[:min_x]
+      mm_per_pixel = viewport_width_mm / [model.active_view.vpwidth.to_f, 1.0].max
+      context = {
+        basis: basis,
+        viewport: viewport,
+        section: active_section(model, camera),
+        profile: profile,
+        mm_per_pixel: [mm_per_pixel, 1.0e-6].max,
+        quality: quality.to_s,
+        definition_complexity_cache: {}
+      }
+      planned_entities = 0
+      visible_root_instances = 0
+      model.entities.each do |entity|
+        if entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+          world_transform = entity.transformation
+          next unless entity_visible?(entity) && instance_intersects_view?(entity, world_transform, context)
+
+          visible_root_instances += 1
+          if quality.to_s == 'precise'
+            planned_entities += entity.definition.entities.length.to_i
+          elsif full_fidelity_block?(entity, context)
+            threshold = quality.to_s == 'balanced' ?
+                          BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD :
+                          LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD
+            planned_entities += definition_complexity(entity.definition, context, threshold)
+          elsif outline_fidelity_block?(entity, world_transform, context)
+            outline_limit = quality.to_s == 'balanced' ? 150_000 : 60_000
+            planned_entities += definition_complexity(entity.definition, context, outline_limit)
+          else
+            cap = block_entity_budget(quality.to_s)
+            planned_entities += definition_complexity(entity.definition, context, cap)
+          end
+        elsif entity_visible?(entity)
+          planned_entities += 1
+        end
+      end
+
+      {
+        uniqueEntities: root_entities + definition_entities,
+        rootEntities: root_entities,
+        definitionEntities: definition_entities,
+        definitionCount: definitions.length,
+        definitionInstances: definition_instances,
+        expandedEstimate: expanded_estimate,
+        visibleRootInstances: visible_root_instances,
+        plannedEntities: [planned_entities, 1].max
+      }
+    end
+    public :workload_summary
+
     def cooperative_checkpoint(context)
       control = context[:cooperative]
       return unless control
@@ -277,6 +366,12 @@ module SketchupCurrentViewCad
     def walk_entities(entities, transform, outer_tag, outer_material, context)
       source_count = entities.respond_to?(:length) ? entities.length.to_i : 0
       selected_entities = context[:light_sampling] ? light_sampled_entities(entities, transform, context) : entities
+      if context[:root_priority]
+        # Consume this flag once. Recursive fallback traversal shares the root
+        # context and must not repeatedly sort large nested collections.
+        context[:root_priority] = false
+        selected_entities = prioritize_root_entities(selected_entities, transform, context)
+      end
       selected_count = selected_entities.respond_to?(:length) ? selected_entities.length.to_i : source_count
       light_plan = context[:light_entity_budget] ? light_child_budget_plan(selected_entities, transform, context) : nil
       selected_entities.each_with_index do |entity, index|
@@ -365,7 +460,14 @@ module SketchupCurrentViewCad
 
     def walk_light_child_entities(entity, world_transform, child_tag, child_material, context, plan)
       shared_budget = context[:light_entity_budget]
-      if full_fidelity_block?(entity, context)
+      fidelity_mode = if context[:time_compact]
+                        nil
+                      elsif full_fidelity_block?(entity, context)
+                        :full
+                      elsif outline_fidelity_block?(entity, world_transform, context)
+                        :outline
+                      end
+      if fidelity_mode
         context[:full_fidelity_children] += 1
         previous_sampling = context[:light_sampling]
         previous_cleanup = context[:light_mesh_cleanup]
@@ -374,10 +476,12 @@ module SketchupCurrentViewCad
         previous_profile = context[:profile]
         context[:light_entity_budget] = nil
         context[:light_sampling] = false
-        context[:light_mesh_cleanup] = false
+        context[:light_mesh_cleanup] = fidelity_mode == :outline
         context[:fidelity] = 'full'
-        context[:occlusion] = context[:requested_occlusion] unless context[:requested_occlusion].nil?
-        context[:profile] = context[:full_fidelity_profile] if context[:full_fidelity_profile]
+        if fidelity_mode == :full
+          context[:occlusion] = context[:requested_occlusion] unless context[:requested_occlusion].nil?
+          context[:profile] = context[:full_fidelity_profile] if context[:full_fidelity_profile]
+        end
         walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
         return
       end
@@ -430,20 +534,22 @@ module SketchupCurrentViewCad
     # most of it.
     def light_sampled_entities(entities, transform, context)
       cache = context[:light_entity_collections] ||= {}
-      key = entities.object_id
+      sample_limit = context[:entity_sample_limit] || LIGHT_ENTITY_SAMPLES_PER_COLLECTION
+      key = [entities.object_id, sample_limit]
       cached = cache[key]
       return cached if cached
 
       count = entities.respond_to?(:length) ? entities.length.to_i : 0
-      sample_limit = context[:entity_sample_limit] || LIGHT_ENTITY_SAMPLES_PER_COLLECTION
       if count <= sample_limit
         selected = entities.to_a
       else
-        selected = []
-        entities.each do |entity|
-          selected << entity
-          break if selected.length >= sample_limit
-        end
+        # Sampling the first N entities erased complete objects stored later in
+        # imported definitions. SketchUp Entities supports indexed access, so
+        # take deterministic evenly distributed samples across the collection
+        # without paying for a full Ruby traversal.
+        step = (count - 1).to_f / [sample_limit - 1, 1].max
+        indexes = (0...sample_limit).map { |index| (index * step).round }.uniq
+        selected = indexes.filter_map { |index| entities[index] }
         context[:skipped_sampled] += [count - selected.length, 0].max
       end
       # Process large child definitions before small decorative meshes. Preserve
@@ -457,6 +563,32 @@ module SketchupCurrentViewCad
         end
       end.map(&:first)
       cache[key] = selected
+    end
+
+    # The time budget is useful only when important objects are handled first.
+    # Preserve root primitives, then complete simple/planar-outline components,
+    # followed by dense components from the largest projected footprint to the
+    # smallest. This prevents late decorative meshes from consuming the budget
+    # before furniture bodies, signs and ordinary groups.
+    def prioritize_root_entities(entities, transform, context)
+      indexed = entities.to_a.each_with_index.to_a
+      indexed.sort_by do |entity, index|
+        unless entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+          next [0, 0.0, index]
+        end
+
+        world_transform = transform * entity.transformation
+        full = full_fidelity_block?(entity, context)
+        outline = !full && outline_fidelity_block?(entity, world_transform, context)
+        width, height = projected_definition_size(entity.definition, world_transform, context[:basis])
+        footprint = width.abs * height.abs
+        priority_class = full ? 1 : (outline ? 2 : 3)
+        [priority_class, -footprint, index]
+      rescue StandardError
+        [4, 0.0, index]
+      end.map(&:first)
+    rescue StandardError
+      entities
     end
 
     def block_candidate?(instance, world_transform, context)
@@ -478,18 +610,20 @@ module SketchupCurrentViewCad
     def emit_instance_block(instance, world_transform, outer_tag, outer_material, context)
       bounded_mode = bounded_block_quality?(context[:quality])
       full_fidelity = full_fidelity_block?(instance, context)
+      outline_priority = outline_fidelity_block?(instance, world_transform, context)
+      preserved_fidelity = full_fidelity || outline_priority
       visibility_state = instance_visibility_state(instance, world_transform, context)
       if visibility_state == :occluded
         context[:skipped_occluded] += 1
         context[:occluded_blocks] += 1
         return :occluded
       end
-
-      context[:full_fidelity_blocks] += 1 if full_fidelity
-      context[:optimized_dense_blocks] += 1 unless full_fidelity
-      cacheable = bounded_mode && !context[:section] &&
+      context[:full_fidelity_blocks] += 1 if preserved_fidelity
+      context[:optimized_dense_blocks] += 1 unless preserved_fidelity
+      cacheable = bounded_mode &&
+                  instance_fully_on_kept_section_side?(instance, world_transform, context) &&
                   instance_fully_inside_view?(instance, world_transform, context) &&
-                  !full_fidelity && visibility_state == :visible
+                  visibility_state == :visible
       cache_key = if cacheable
                     light_block_cache_key(instance, world_transform, outer_tag, outer_material)
                   end
@@ -524,13 +658,32 @@ module SketchupCurrentViewCad
           return :emitted
         end
       end
-
-      dense_sampling = bounded_mode && !full_fidelity
+      if !preserved_fidelity && dense_stop_deadline_exceeded?(context)
+        context[:omitted_time_budget] += 1
+        return :emitted
+      end
+      dense_sampling = bounded_mode && !preserved_fidelity
       entity_budget = block_entity_budget(context[:quality])
       sample_limit = entity_sample_limit(context[:quality])
-      mesh_cleanup_pixels = context[:quality] == 'light' ? 0.75 : 0.4
+      hard_budget_mode = dense_sampling && dense_hard_deadline_exceeded?(context)
+      if hard_budget_mode
+        # Never erase a whole late furniture/sign component. Emit a compact
+        # representative outline after the deadline so every visible root
+        # object still has editable CAD geometry.
+        context[:skipped_time_budget] += 1
+        entity_budget = [entity_budget, context[:quality] == 'balanced' ? 300 : 150].min
+        sample_limit = [sample_limit, context[:quality] == 'balanced' ? 240 : 120].min
+      elsif dense_sampling && dense_soft_deadline_exceeded?(context)
+        entity_budget = [entity_budget, context[:quality] == 'balanced' ? 8_000 : 4_000].min
+        sample_limit = [sample_limit, context[:quality] == 'balanced' ? 6_000 : 3_000].min
+      end
+      mesh_cleanup_pixels = if hard_budget_mode
+                              context[:quality] == 'balanced' ? 0.8 : 1.2
+                            else
+                              context[:quality] == 'light' ? 0.75 : 0.4
+                            end
       block_occlusion = context[:occlusion] && (full_fidelity || visibility_state == :partial)
-      block_profile = if block_occlusion && !full_fidelity
+      block_profile = if block_occlusion && !preserved_fidelity
                         dense_occlusion_profile(context[:profile], context[:quality])
                       else
                         context[:profile]
@@ -562,16 +715,22 @@ module SketchupCurrentViewCad
         light_entity_collections: context[:light_entity_collections],
         definition_complexity_cache: context[:definition_complexity_cache],
         block_mode: false,
+        root_priority: false,
         emit_materials: context[:emit_materials],
         material_prefilter: true,
         profile: block_profile,
-        full_fidelity_profile: context[:profile],
+        full_fidelity_profile: full_fidelity_occlusion_profile(context[:profile], context[:quality]),
         quality: context[:quality],
         mm_per_pixel: context[:mm_per_pixel],
         cooperative: context[:cooperative],
-        fidelity: full_fidelity ? 'full' : 'dense',
+        export_started: context[:export_started],
+        dense_soft_deadline: context[:dense_soft_deadline],
+        dense_hard_deadline: context[:dense_hard_deadline],
+        dense_stop_deadline: context[:dense_stop_deadline],
+        fidelity: preserved_fidelity ? 'full' : 'dense',
         light_sampling: dense_sampling,
-        light_mesh_cleanup: dense_sampling,
+        time_compact: hard_budget_mode,
+        light_mesh_cleanup: dense_sampling || outline_priority,
         mesh_cleanup_pixels: mesh_cleanup_pixels,
         entity_sample_limit: sample_limit,
         light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil,
@@ -584,6 +743,8 @@ module SketchupCurrentViewCad
         full_fidelity_children: 0,
         optimized_dense_blocks: 0,
         occluded_blocks: 0,
+        skipped_time_budget: 0,
+        omitted_time_budget: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -605,7 +766,7 @@ module SketchupCurrentViewCad
       return :fallback unless normalized
 
       contains_full_fidelity = block_context[:lines].any? { |line| line[:fidelity] == 'full' }
-      optimization_class = if full_fidelity
+      optimization_class = if preserved_fidelity
                              'full'
                            elsif contains_full_fidelity
                              'mixed'
@@ -660,6 +821,8 @@ module SketchupCurrentViewCad
       context[:material_faces] += block_context[:material_faces]
       context[:ray_errors] += block_context[:ray_errors]
       context[:full_fidelity_children] += block_context[:full_fidelity_children]
+      context[:skipped_time_budget] += block_context[:skipped_time_budget]
+      context[:omitted_time_budget] += block_context[:omitted_time_budget]
       :emitted
     rescue StandardError
       :fallback
@@ -669,6 +832,21 @@ module SketchupCurrentViewCad
       quality == 'light' || quality == 'balanced'
     end
 
+    def dense_soft_deadline_exceeded?(context)
+      deadline = context[:dense_soft_deadline]
+      deadline && monotonic_time >= deadline
+    end
+
+    def dense_hard_deadline_exceeded?(context)
+      deadline = context[:dense_hard_deadline]
+      deadline && monotonic_time >= deadline
+    end
+
+    def dense_stop_deadline_exceeded?(context)
+      deadline = context[:dense_stop_deadline]
+      deadline && monotonic_time >= deadline
+    end
+
     def full_fidelity_block?(instance, context)
       return true unless bounded_block_quality?(context[:quality])
 
@@ -676,6 +854,33 @@ module SketchupCurrentViewCad
                     BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD :
                     LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD
       definition_complexity(instance.definition, context, threshold) <= threshold
+    rescue StandardError
+      false
+    end
+
+    # Imported lettering and logos are often technically dense because curved
+    # glyphs are triangulated, while visually they are thin planar line art.
+    # Read these definitions completely but retain mesh cleanup, which preserves
+    # outlines/holes and removes side-wall triangulation.
+    def outline_fidelity_block?(instance, world_transform, context)
+      return false unless bounded_block_quality?(context[:quality])
+
+      entity_limit = context[:quality] == 'balanced' ? 60_000 : 20_000
+      direct_count = instance.definition.entities.length.to_i
+      return false if direct_count <= 0 || direct_count > entity_limit
+      recursive_limit = context[:quality] == 'balanced' ? 150_000 : 60_000
+      return false if definition_complexity(instance.definition, context, recursive_limit) > recursive_limit
+
+      projected = bounds_corners(instance.definition.bounds).map do |point|
+        project(point.transform(world_transform), context[:basis])
+      end
+      width = projected.map { |point| point[0] }.max - projected.map { |point| point[0] }.min
+      height = projected.map { |point| point[1] }.max - projected.map { |point| point[1] }.min
+      depth = projected.map { |point| point[2] }.max - projected.map { |point| point[2] }.min
+      major = [width.abs, height.abs].max
+      return false if major / context[:mm_per_pixel] < 8.0
+
+      depth.abs <= [major * 0.08, context[:mm_per_pixel] * 4.0].max
     rescue StandardError
       false
     end
@@ -716,6 +921,24 @@ module SketchupCurrentViewCad
           max_visibility_intervals: [profile[:max_visibility_intervals], 2].min,
           max_clip_depth: [profile[:max_clip_depth], 2].min,
           depth_tile_pixels: [profile[:depth_tile_pixels], 8.0].max
+        )
+      end
+    end
+
+    def full_fidelity_occlusion_profile(profile, quality)
+      if quality == 'balanced'
+        profile.merge(
+          sample_pixels: [profile[:sample_pixels], 4.0].max,
+          max_visibility_intervals: [profile[:max_visibility_intervals], 8].min,
+          max_clip_depth: [profile[:max_clip_depth], 4].min,
+          depth_tile_pixels: [profile[:depth_tile_pixels], 4.0].max
+        )
+      else
+        profile.merge(
+          sample_pixels: [profile[:sample_pixels], 8.0].max,
+          max_visibility_intervals: [profile[:max_visibility_intervals], 4].min,
+          max_clip_depth: [profile[:max_clip_depth], 3].min,
+          depth_tile_pixels: [profile[:depth_tile_pixels], 6.0].max
         )
       end
     end
@@ -848,6 +1071,18 @@ module SketchupCurrentViewCad
       projected.all? do |point|
         point[0] >= viewport[:min_x] && point[0] <= viewport[:max_x] &&
           point[1] >= viewport[:min_y] && point[1] <= viewport[:max_y]
+      end
+    rescue StandardError
+      false
+    end
+
+    def instance_fully_on_kept_section_side?(instance, world_transform, context)
+      section = context[:section]
+      return true unless section
+
+      bounds_corners(instance.definition.bounds).all? do |point|
+        world_point = point.transform(world_transform)
+        plane_distance(world_point, section[:plane]) * section[:keep_multiplier] >= SECTION_TOLERANCE_INCH
       end
     rescue StandardError
       false
