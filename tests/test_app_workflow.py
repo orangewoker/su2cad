@@ -77,6 +77,14 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertIsInstance(app.paper_segment, ctk.CTkOptionMenu)
             self.assertEqual(app.paper_segment.cget("values"), ["AUTO", "A4", "A3", "A2", "A1", "A0"])
             self.assertGreaterEqual(len(app.settings_detail_labels), 5)
+            self.assertEqual(app.advanced_frame.winfo_manager(), "grid")
+            self.assertFalse(hasattr(app, "advanced_button"))
+            self.assertEqual(app.export_button.cget("fg_color"), "#16A36A")
+            self.assertEqual(app.quality_segment.cget("selected_color"), "#16A36A")
+            self.assertIn(
+                app.font_family,
+                {".萍方-简", "萍方-简", "PingFang SC", "苹方-简", "Microsoft YaHei UI", "TkDefaultFont"},
+            )
             with (
                 patch.object(app.settings_card._parent_canvas, "winfo_height", return_value=900),
                 patch.object(app.settings_card, "winfo_reqheight", return_value=700),

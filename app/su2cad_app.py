@@ -7,6 +7,7 @@ import queue
 import threading
 import traceback
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -31,8 +32,8 @@ SURFACE_ALT = "#F0F3F6"
 BORDER = "#E0E5EA"
 TEXT = "#20262E"
 MUTED = "#6B7682"
-PRIMARY = "#2563EB"
-PRIMARY_HOVER = "#1D4ED8"
+PRIMARY = "#16A36A"
+PRIMARY_HOVER = "#128158"
 SUCCESS = "#23865A"
 SUCCESS_SOFT = "#E8F5EE"
 WARNING = "#B66A11"
@@ -63,9 +64,18 @@ def enable_high_dpi() -> None:
             pass
 
 
+def resolve_ui_font(root: tk.Misc) -> str:
+    families = set(tkfont.families(root))
+    for candidate in (".萍方-简", "萍方-简", "PingFang SC", "苹方-简", "Microsoft YaHei UI"):
+        if candidate in families:
+            return candidate
+    return "TkDefaultFont"
+
+
 class SU2CADApp:
     def __init__(self, root: ctk.CTk) -> None:
         self.root = root
+        self.font_family = resolve_ui_font(root)
         self.root.title(f"SU2CAD {APP_VERSION}")
         icon_path = resource_root() / "assets" / "su2cad.ico"
         if icon_path.exists():
@@ -85,7 +95,6 @@ class SU2CADApp:
         self.last_result: ExportResult | None = None
         self.recent_row_widgets: list[ctk.CTkBaseClass] = []
         self.log_visible = False
-        self.advanced_visible = False
         self.compact_mode = False
         self.compact_settings_visible = False
         self.resize_job: str | None = None
@@ -133,6 +142,9 @@ class SU2CADApp:
     def _quality_for_lines(value: int) -> str:
         return min(QUALITY_LINES, key=lambda name: abs(QUALITY_LINES[name] - value))
 
+    def _font(self, size: int, weight: str = "normal") -> ctk.CTkFont:
+        return ctk.CTkFont(family=self.font_family, size=size, weight=weight)
+
     def _build_ui(self) -> None:
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(1, weight=1)
@@ -150,23 +162,23 @@ class SU2CADApp:
 
         brand = ctk.CTkFrame(header, fg_color="transparent")
         brand.grid(row=0, column=0, padx=(28, 24), pady=18, sticky="w")
-        ctk.CTkLabel(brand, text="SU2CAD", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 22, "bold")).pack(anchor="w")
+        ctk.CTkLabel(brand, text="SU2CAD", text_color=TEXT, font=self._font(20, "bold")).pack(anchor="w")
         ctk.CTkLabel(
             brand,
             text="SketchUp 可见视图转轻量 CAD",
             text_color=MUTED,
-            font=ctk.CTkFont("Microsoft YaHei UI", 12),
+            font=self._font(11),
         ).pack(anchor="w", pady=(2, 0))
 
         model = ctk.CTkFrame(header, fg_color="transparent")
         self.model_panel = model
         model.grid(row=0, column=1, padx=12, pady=18, sticky="w")
-        ctk.CTkLabel(model, text="当前模型", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).pack(anchor="w")
+        ctk.CTkLabel(model, text="当前模型", text_color=MUTED, font=self._font(10)).pack(anchor="w")
         ctk.CTkLabel(
             model,
             textvariable=self.model_var,
             text_color=TEXT,
-            font=ctk.CTkFont("Microsoft YaHei UI", 14, "bold"),
+            font=self._font(13, "bold"),
         ).pack(anchor="w", pady=(4, 0))
 
         status = ctk.CTkFrame(header, fg_color="transparent")
@@ -180,7 +192,7 @@ class SU2CADApp:
             corner_radius=8,
             fg_color=WARNING_SOFT,
             text_color=WARNING,
-            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+            font=self._font(10, "bold"),
         )
         self.sketchup_chip.grid(row=0, column=0, padx=(0, 8))
         self.cad_chip = ctk.CTkLabel(
@@ -191,7 +203,7 @@ class SU2CADApp:
             corner_radius=8,
             fg_color=WARNING_SOFT,
             text_color=WARNING,
-            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+            font=self._font(10, "bold"),
         )
         self.cad_chip.grid(row=0, column=1, padx=(0, 8))
         self.refresh_button = ctk.CTkButton(
@@ -203,6 +215,7 @@ class SU2CADApp:
             fg_color=SURFACE_ALT,
             hover_color=BORDER,
             text_color=TEXT,
+            font=self._font(10),
             command=self._refresh_status_now,
         )
         self.refresh_button.grid(row=0, column=2)
@@ -215,6 +228,7 @@ class SU2CADApp:
             fg_color=SURFACE_ALT,
             hover_color=BORDER,
             text_color=TEXT,
+            font=self._font(10),
             command=self._toggle_compact_settings,
         )
         self.compact_settings_button.grid(row=0, column=3, padx=(8, 0))
@@ -246,7 +260,7 @@ class SU2CADApp:
         card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         card.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(card, text="标准图幅", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+        ctk.CTkLabel(card, text="标准图幅", text_color=TEXT, font=self._font(11, "bold"), height=20).grid(
             row=0, column=0, padx=20, pady=(18, 0), sticky="w"
         )
         self.paper_segment = ctk.CTkOptionMenu(
@@ -256,13 +270,14 @@ class SU2CADApp:
             height=34,
             corner_radius=7,
             fg_color=SURFACE_ALT,
-            button_color="#D8E0E8",
-            button_hover_color="#C7D0D9",
+            button_color=PRIMARY,
+            button_hover_color=PRIMARY_HOVER,
             text_color=TEXT,
             dropdown_fg_color=SURFACE,
             dropdown_hover_color=SURFACE_ALT,
             dropdown_text_color=TEXT,
-            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+            font=self._font(10, "bold"),
+            dropdown_font=self._font(10),
         )
         self.paper_segment.grid(row=1, column=0, padx=20, pady=(8, 12), sticky="ew")
 
@@ -271,7 +286,7 @@ class SU2CADApp:
         self._add_switch(card, 4, "生成总尺寸", "自动标注图形总宽与总高", self.dimensions_var)
         self._add_switch(card, 5, "完成后打开 CAD", "输出后自动切换到 AutoCAD / 天正", self.open_cad_var)
 
-        ctk.CTkLabel(card, text="场景精度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+        ctk.CTkLabel(card, text="场景精度", text_color=TEXT, font=self._font(11, "bold"), height=20).grid(
             row=6, column=0, padx=20, pady=(10, 0), sticky="w"
         )
         self.quality_segment = ctk.CTkSegmentedButton(
@@ -281,18 +296,20 @@ class SU2CADApp:
             command=self._set_quality,
             height=36,
             corner_radius=7,
-            selected_color="#334155",
-            selected_hover_color="#1F2937",
+            selected_color=PRIMARY,
+            selected_hover_color=PRIMARY_HOVER,
             unselected_color=SURFACE_ALT,
             unselected_hover_color=BORDER,
             text_color=TEXT,
+            font=self._font(10),
         )
         self.quality_segment.grid(row=7, column=0, padx=20, pady=(8, 8), sticky="ew")
         quality_detail = ctk.CTkLabel(
             card,
             text="同时控制遮挡采样、材质细节和块线数",
             text_color=MUTED,
-            font=ctk.CTkFont("Microsoft YaHei UI", 10),
+            font=self._font(9),
+            height=18,
             anchor="w",
             justify="left",
             wraplength=250,
@@ -300,22 +317,30 @@ class SU2CADApp:
         quality_detail.grid(row=8, column=0, padx=20, pady=(0, 4), sticky="ew")
         self.settings_detail_labels.append(quality_detail)
 
-        self.advanced_button = ctk.CTkButton(
+        ctk.CTkLabel(
             card,
             text="高级设置",
-            height=32,
-            fg_color="transparent",
-            hover_color=SURFACE_ALT,
-            text_color=MUTED,
-            anchor="w",
-            command=self._toggle_advanced,
-        )
-        self.advanced_button.grid(row=9, column=0, padx=14, sticky="ew")
+            text_color=TEXT,
+            font=self._font(11, "bold"),
+            height=20,
+        ).grid(row=9, column=0, padx=20, pady=(8, 0), sticky="w")
         self.advanced_frame = ctk.CTkFrame(card, fg_color=SURFACE_ALT, corner_radius=8)
         self.advanced_frame.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(self.advanced_frame, text="块最大线数", text_color=TEXT).grid(row=0, column=0, padx=12, pady=12, sticky="w")
-        ctk.CTkEntry(self.advanced_frame, textvariable=self.max_lines_var, width=110, height=32).grid(
-            row=0, column=1, padx=12, pady=12, sticky="e"
+        ctk.CTkLabel(
+            self.advanced_frame,
+            text="块最大线数",
+            text_color=TEXT,
+            font=self._font(10),
+            height=20,
+        ).grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkEntry(
+            self.advanced_frame,
+            textvariable=self.max_lines_var,
+            width=96,
+            height=28,
+            font=self._font(10),
+        ).grid(
+            row=0, column=1, padx=10, pady=8, sticky="e"
         )
         ctk.CTkSwitch(
             self.advanced_frame,
@@ -324,13 +349,14 @@ class SU2CADApp:
             progress_color=PRIMARY,
             button_color=SURFACE,
             button_hover_color=BORDER,
-        ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
-        self.advanced_frame.grid(row=10, column=0, padx=20, pady=(6, 14), sticky="ew")
-        self.advanced_frame.grid_remove()
+            font=self._font(9),
+            height=24,
+        ).grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="w")
+        self.advanced_frame.grid(row=10, column=0, padx=20, pady=(6, 12), sticky="ew")
 
     def _add_switch(self, parent, row: int, title: str, detail: str, variable: tk.BooleanVar) -> None:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.grid(row=row, column=0, padx=20, pady=5, sticky="ew")
+        frame.grid(row=row, column=0, padx=20, pady=2, sticky="ew")
         frame.grid_columnconfigure(0, weight=1)
         text = ctk.CTkFrame(frame, fg_color="transparent")
         text.grid(row=0, column=0, sticky="ew")
@@ -339,7 +365,8 @@ class SU2CADApp:
             text,
             text=title,
             text_color=TEXT,
-            font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold"),
+            font=self._font(11, "bold"),
+            height=20,
             anchor="w",
             justify="left",
         ).grid(row=0, column=0, sticky="ew")
@@ -347,7 +374,8 @@ class SU2CADApp:
             text,
             text=detail,
             text_color=MUTED,
-            font=ctk.CTkFont("Microsoft YaHei UI", 10),
+            font=self._font(9),
+            height=18,
             anchor="w",
             justify="left",
             wraplength=210,
@@ -381,6 +409,7 @@ class SU2CADApp:
             text_color=TEXT,
         )
         self.tabs.grid(row=0, column=0, sticky="nsew", padx=14, pady=12)
+        self.tabs._segmented_button.configure(font=self._font(10))
         task = self.tabs.add("当前任务")
         recent = self.tabs.add("最近输出")
         self._build_task_tab(task)
@@ -411,20 +440,20 @@ class SU2CADApp:
             corner_radius=7,
             fg_color=SUCCESS_SOFT,
             text_color=SUCCESS,
-            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+            font=self._font(10, "bold"),
         )
         self.state_badge.grid(row=0, column=0, padx=18, pady=(16, 4), sticky="w")
         ctk.CTkLabel(
             state,
             textvariable=self.result_title_var,
             text_color=TEXT,
-            font=ctk.CTkFont("Microsoft YaHei UI", 18, "bold"),
+            font=self._font(16, "bold"),
         ).grid(row=1, column=0, padx=18, pady=(4, 2), sticky="w")
         self.result_detail_label = ctk.CTkLabel(
             state,
             textvariable=self.result_detail_var,
             text_color=MUTED,
-            font=ctk.CTkFont("Microsoft YaHei UI", 11),
+            font=self._font(10),
             wraplength=600,
             justify="left",
         )
@@ -433,10 +462,10 @@ class SU2CADApp:
         phase = ctk.CTkFrame(tab, fg_color="transparent")
         phase.grid(row=1, column=0, padx=8, sticky="ew")
         phase.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(phase, text="任务进度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
+        ctk.CTkLabel(phase, text="任务进度", text_color=TEXT, font=self._font(11, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        ctk.CTkLabel(phase, textvariable=self.phase_var, text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)).grid(
+        ctk.CTkLabel(phase, textvariable=self.phase_var, text_color=MUTED, font=self._font(10)).grid(
             row=0, column=1, sticky="e"
         )
         self.progress = ctk.CTkProgressBar(tab, height=9, corner_radius=5, progress_color=PRIMARY, fg_color=BORDER)
@@ -453,6 +482,7 @@ class SU2CADApp:
             fg_color=SURFACE_ALT,
             hover_color=BORDER,
             text_color=TEXT,
+            font=self._font(10),
             command=self._open_last_result,
             state="disabled",
         )
@@ -465,6 +495,7 @@ class SU2CADApp:
             fg_color=SURFACE_ALT,
             hover_color=BORDER,
             text_color=TEXT,
+            font=self._font(10),
             command=self._open_output_folder,
         ).grid(row=0, column=1)
 
@@ -479,6 +510,7 @@ class SU2CADApp:
             hover_color=SURFACE_ALT,
             text_color=MUTED,
             anchor="w",
+            font=self._font(10),
             command=self._toggle_log,
         )
         self.log_button.grid(row=0, column=0, sticky="ew")
@@ -490,7 +522,7 @@ class SU2CADApp:
             border_color=BORDER,
             fg_color="#FAFBFC",
             text_color="#435160",
-            font=("Cascadia Mono", 10),
+            font=(self.font_family, 9),
             wrap="word",
         )
         self.log_text.grid(row=1, column=0, pady=(6, 0), sticky="ew")
@@ -503,7 +535,7 @@ class SU2CADApp:
             tab,
             text="最近生成的 CAD",
             text_color=TEXT,
-            font=ctk.CTkFont("Microsoft YaHei UI", 16, "bold"),
+            font=self._font(14, "bold"),
         ).grid(row=0, column=0, padx=8, pady=(18, 8), sticky="w")
         self.recent_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent", corner_radius=0)
         self.recent_frame.grid(row=1, column=0, padx=0, pady=(0, 8), sticky="nsew")
@@ -517,7 +549,7 @@ class SU2CADApp:
         footer.grid_propagate(False)
 
         self.output_label = ctk.CTkLabel(
-            footer, text="输出目录", text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 11)
+            footer, text="输出目录", text_color=MUTED, font=self._font(10)
         )
         self.output_label.grid(row=0, column=0, padx=(28, 10), pady=23, sticky="w")
         self.output_entry = ctk.CTkEntry(
@@ -528,6 +560,7 @@ class SU2CADApp:
             border_width=1,
             border_color=BORDER,
             fg_color="#FAFBFC",
+            font=self._font(10),
         )
         self.output_entry.grid(row=0, column=1, pady=23, sticky="ew")
         self.browse_button = ctk.CTkButton(
@@ -539,6 +572,7 @@ class SU2CADApp:
             fg_color=SURFACE_ALT,
             hover_color=BORDER,
             text_color=TEXT,
+            font=self._font(10),
             command=self._browse_output,
         )
         self.browse_button.grid(row=0, column=2, padx=(10, 16), pady=23)
@@ -551,6 +585,7 @@ class SU2CADApp:
             fg_color=ERROR_SOFT,
             hover_color="#F7D9DC",
             text_color=ERROR,
+            font=self._font(10),
             command=self._cancel_export,
         )
         self.cancel_button.grid(row=0, column=3, padx=(0, 10), pady=22)
@@ -564,21 +599,11 @@ class SU2CADApp:
             fg_color=PRIMARY,
             hover_color=PRIMARY_HOVER,
             text_color="#FFFFFF",
-            font=ctk.CTkFont("Microsoft YaHei UI", 13, "bold"),
+            font=self._font(12, "bold"),
             command=self._start_export,
             state="disabled",
         )
         self.export_button.grid(row=0, column=4, padx=(0, 28), pady=21)
-
-    def _toggle_advanced(self) -> None:
-        self.advanced_visible = not self.advanced_visible
-        if self.advanced_visible:
-            self.advanced_frame.grid()
-            self.advanced_button.configure(text="收起高级设置")
-        else:
-            self.advanced_frame.grid_remove()
-            self.advanced_button.configure(text="高级设置")
-        self._schedule_settings_scrollbar_update()
 
     def _toggle_log(self) -> None:
         self.log_visible = not self.log_visible
@@ -942,7 +967,7 @@ class SU2CADApp:
                 self.recent_frame,
                 text="还没有输出记录",
                 text_color=MUTED,
-                font=ctk.CTkFont("Microsoft YaHei UI", 12),
+                font=self._font(11),
             ).grid(row=0, column=0, padx=12, pady=36)
             return
         for index, item in enumerate(recent):
@@ -954,14 +979,14 @@ class SU2CADApp:
                 row,
                 text=path.name,
                 text_color=TEXT,
-                font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
+                font=self._font(10, "bold"),
                 anchor="w",
             ).grid(row=0, column=0, padx=14, pady=(10, 2), sticky="ew")
             ctk.CTkLabel(
                 row,
                 text=f"{item.get('time', '')}  ·  {item.get('layout', '')}  ·  {item.get('size', '')}",
                 text_color=MUTED,
-                font=ctk.CTkFont("Microsoft YaHei UI", 10),
+                font=self._font(9),
                 anchor="w",
             ).grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
             ctk.CTkButton(
@@ -972,6 +997,7 @@ class SU2CADApp:
                 fg_color=SURFACE,
                 hover_color=BORDER,
                 text_color=TEXT,
+                font=self._font(10),
                 command=lambda selected=path: self._open_path(selected),
             ).grid(row=0, column=1, rowspan=2, padx=12, pady=10)
 
