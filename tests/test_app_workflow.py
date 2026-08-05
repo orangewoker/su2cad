@@ -72,10 +72,18 @@ class AppWorkflowTests(unittest.TestCase):
             saved = app._load_settings()
             self.assertEqual(saved["max_block_lines"], 2500)
             self.assertIsInstance(app.settings_card, ctk.CTkScrollableFrame)
-            self.assertIsInstance(app.task_scroll, ctk.CTkScrollableFrame)
+            self.assertIsInstance(app.task_content, ctk.CTkFrame)
+            self.assertFalse(hasattr(app, "task_scroll"))
             self.assertIsInstance(app.paper_segment, ctk.CTkOptionMenu)
             self.assertEqual(app.paper_segment.cget("values"), ["AUTO", "A4", "A3", "A2", "A1", "A0"])
             self.assertGreaterEqual(len(app.settings_detail_labels), 5)
+            with (
+                patch.object(app.settings_card._parent_canvas, "winfo_height", return_value=900),
+                patch.object(app.settings_card, "winfo_reqheight", return_value=700),
+                patch.object(app.settings_card._scrollbar, "grid_remove") as hide_scrollbar,
+            ):
+                app._update_settings_scrollbar_visibility()
+                hide_scrollbar.assert_called_once()
             app._apply_responsive_layout(820)
             self.assertTrue(app.compact_mode)
             self.assertEqual(app.compact_settings_button.cget("text"), "设置")

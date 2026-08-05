@@ -89,6 +89,7 @@ class SU2CADApp:
         self.compact_mode = False
         self.compact_settings_visible = False
         self.resize_job: str | None = None
+        self.settings_scroll_job: str | None = None
         self.last_progress_value = -1
         self.last_progress_message = ""
         self.last_log_message = ""
@@ -125,6 +126,7 @@ class SU2CADApp:
         self.root.after(100, self._drain_events)
         self.root.after(200, self._refresh_status)
         self.root.after(0, lambda: self._apply_responsive_layout(self.root.winfo_width()))
+        self.root.after(250, self._update_settings_scrollbar_visibility)
         self._log(f"SU2CAD {APP_VERSION} 已启动")
 
     @staticmethod
@@ -244,18 +246,8 @@ class SU2CADApp:
         card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         card.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(card, text="导出设置", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 16, "bold")).grid(
-            row=0, column=0, padx=20, pady=(20, 4), sticky="w"
-        )
-        ctk.CTkLabel(
-            card,
-            text="控制图纸表达和几何精度",
-            text_color=MUTED,
-            font=ctk.CTkFont("Microsoft YaHei UI", 11),
-        ).grid(row=1, column=0, padx=20, pady=(0, 18), sticky="w")
-
         ctk.CTkLabel(card, text="标准图幅", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
-            row=2, column=0, padx=20, sticky="w"
+            row=0, column=0, padx=20, pady=(18, 0), sticky="w"
         )
         self.paper_segment = ctk.CTkOptionMenu(
             card,
@@ -272,15 +264,15 @@ class SU2CADApp:
             dropdown_text_color=TEXT,
             font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
         )
-        self.paper_segment.grid(row=3, column=0, padx=20, pady=(8, 20), sticky="ew")
+        self.paper_segment.grid(row=1, column=0, padx=20, pady=(8, 12), sticky="ew")
 
-        self._add_switch(card, 4, "仅输出可见线", "隐藏墙后、内部及背面线条", self.occlusion_var)
-        self._add_switch(card, 5, "材质色块", "SketchUp 材质转换为 CAD 实色填充", self.materials_var)
-        self._add_switch(card, 6, "生成总尺寸", "自动标注图形总宽与总高", self.dimensions_var)
-        self._add_switch(card, 7, "完成后打开 CAD", "输出后自动切换到 AutoCAD / 天正", self.open_cad_var)
+        self._add_switch(card, 2, "仅输出可见线", "隐藏墙后、内部及背面线条", self.occlusion_var)
+        self._add_switch(card, 3, "材质色块", "SketchUp 材质转换为 CAD 实色填充", self.materials_var)
+        self._add_switch(card, 4, "生成总尺寸", "自动标注图形总宽与总高", self.dimensions_var)
+        self._add_switch(card, 5, "完成后打开 CAD", "输出后自动切换到 AutoCAD / 天正", self.open_cad_var)
 
         ctk.CTkLabel(card, text="场景精度", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
-            row=8, column=0, padx=20, pady=(18, 0), sticky="w"
+            row=6, column=0, padx=20, pady=(10, 0), sticky="w"
         )
         self.quality_segment = ctk.CTkSegmentedButton(
             card,
@@ -295,7 +287,7 @@ class SU2CADApp:
             unselected_hover_color=BORDER,
             text_color=TEXT,
         )
-        self.quality_segment.grid(row=9, column=0, padx=20, pady=(8, 14), sticky="ew")
+        self.quality_segment.grid(row=7, column=0, padx=20, pady=(8, 8), sticky="ew")
         quality_detail = ctk.CTkLabel(
             card,
             text="同时控制遮挡采样、材质细节和块线数",
@@ -305,7 +297,7 @@ class SU2CADApp:
             justify="left",
             wraplength=250,
         )
-        quality_detail.grid(row=10, column=0, padx=20, pady=(0, 8), sticky="ew")
+        quality_detail.grid(row=8, column=0, padx=20, pady=(0, 4), sticky="ew")
         self.settings_detail_labels.append(quality_detail)
 
         self.advanced_button = ctk.CTkButton(
@@ -318,7 +310,7 @@ class SU2CADApp:
             anchor="w",
             command=self._toggle_advanced,
         )
-        self.advanced_button.grid(row=11, column=0, padx=14, sticky="ew")
+        self.advanced_button.grid(row=9, column=0, padx=14, sticky="ew")
         self.advanced_frame = ctk.CTkFrame(card, fg_color=SURFACE_ALT, corner_radius=8)
         self.advanced_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(self.advanced_frame, text="块最大线数", text_color=TEXT).grid(row=0, column=0, padx=12, pady=12, sticky="w")
@@ -333,7 +325,7 @@ class SU2CADApp:
             button_color=SURFACE,
             button_hover_color=BORDER,
         ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
-        self.advanced_frame.grid(row=12, column=0, padx=20, pady=(6, 20), sticky="ew")
+        self.advanced_frame.grid(row=10, column=0, padx=20, pady=(6, 14), sticky="ew")
         self.advanced_frame.grid_remove()
 
     def _add_switch(self, parent, row: int, title: str, detail: str, variable: tk.BooleanVar) -> None:
@@ -398,15 +390,12 @@ class SU2CADApp:
         outer_tab = tab
         outer_tab.grid_columnconfigure(0, weight=1)
         outer_tab.grid_rowconfigure(0, weight=1)
-        tab = ctk.CTkScrollableFrame(
+        tab = ctk.CTkFrame(
             outer_tab,
             fg_color="transparent",
             corner_radius=0,
-            scrollbar_fg_color=SURFACE,
-            scrollbar_button_color="#C7D0D9",
-            scrollbar_button_hover_color="#AEB9C4",
         )
-        self.task_scroll = tab
+        self.task_content = tab
         tab.grid(row=0, column=0, sticky="nsew")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(4, weight=1)
@@ -589,6 +578,7 @@ class SU2CADApp:
         else:
             self.advanced_frame.grid_remove()
             self.advanced_button.configure(text="高级设置")
+        self._schedule_settings_scrollbar_update()
 
     def _toggle_log(self) -> None:
         self.log_visible = not self.log_visible
@@ -607,6 +597,27 @@ class SU2CADApp:
         width = int(event.width)
         self.resize_job = self.root.after(100, lambda: self._apply_responsive_layout(width))
 
+    def _schedule_settings_scrollbar_update(self) -> None:
+        if self.settings_scroll_job is not None:
+            self.root.after_cancel(self.settings_scroll_job)
+        self.settings_scroll_job = self.root.after(120, self._update_settings_scrollbar_visibility)
+
+    def _update_settings_scrollbar_visibility(self) -> None:
+        self.settings_scroll_job = None
+        scrollbar = getattr(self.settings_card, "_scrollbar", None)
+        canvas = getattr(self.settings_card, "_parent_canvas", None)
+        if scrollbar is None or canvas is None:
+            return
+        viewport_height = int(canvas.winfo_height())
+        content_height = int(self.settings_card.winfo_reqheight())
+        if viewport_height <= 1:
+            return
+        if content_height > viewport_height + 4:
+            scrollbar.grid()
+        else:
+            scrollbar.grid_remove()
+            canvas.yview_moveto(0.0)
+
     def _apply_responsive_layout(self, width: int) -> None:
         self.resize_job = None
         compact = width < COMPACT_BREAKPOINT
@@ -615,6 +626,7 @@ class SU2CADApp:
         settings_wrap = max(170, width - 130) if compact else 210
         for label in self.settings_detail_labels:
             label.configure(wraplength=settings_wrap)
+        self._schedule_settings_scrollbar_update()
         if compact == self.compact_mode:
             return
 
@@ -673,6 +685,7 @@ class SU2CADApp:
             self.settings_card.grid_remove()
             self.workspace_card.grid(row=0, column=0, sticky="nsew", padx=0)
             self.compact_settings_button.configure(text="设置")
+        self._schedule_settings_scrollbar_update()
 
     def _set_quality(self, value: str) -> None:
         self.max_lines_var.set(str(QUALITY_LINES[value]))

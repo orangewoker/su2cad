@@ -94,7 +94,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 
 `dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。它直接连接本机 SketchUp Bridge，并在窗口中完成参数设置、进度显示、DXF 生成和 CAD 打开。SketchUp 端仍需安装并启动本地 Bridge 插件。
 
-下载 GitHub Release 中的 `SU2CAD-0.3.1-windows-x64.zip`，完整解压后运行：
+下载 GitHub Release 中的 `SU2CAD-0.3.2-windows-x64.zip`，完整解压后运行：
 
 ```text
 SU2CAD\SU2CAD.exe
