@@ -21,6 +21,7 @@ from core import (
     bridge_health,
     cad_is_running,
     export_current_view,
+    resource_root,
 )
 
 
@@ -50,6 +51,10 @@ def enable_high_dpi() -> None:
     if os.name != "nt":
         return
     try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SU2CAD.Desktop")
+    except Exception:
+        pass
+    try:
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except Exception:
         try:
@@ -62,6 +67,12 @@ class SU2CADApp:
     def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         self.root.title(f"SU2CAD {APP_VERSION}")
+        icon_path = resource_root() / "assets" / "su2cad.ico"
+        if icon_path.exists():
+            try:
+                self.root.iconbitmap(default=str(icon_path))
+            except tk.TclError:
+                pass
         self.root.geometry("1180x760")
         self.root.minsize(780, 560)
         self.root.configure(fg_color=BG)
@@ -82,6 +93,7 @@ class SU2CADApp:
         self.last_progress_message = ""
         self.last_log_message = ""
         self.log_line_count = 0
+        self.settings_detail_labels: list[ctk.CTkLabel] = []
         self.settings_path = Path(os.environ.get("APPDATA", str(Path.home()))) / "SU2CAD" / "settings.json"
         self.saved = self._load_settings()
         try:
@@ -245,17 +257,20 @@ class SU2CADApp:
         ctk.CTkLabel(card, text="标准图幅", text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).grid(
             row=2, column=0, padx=20, sticky="w"
         )
-        self.paper_segment = ctk.CTkSegmentedButton(
+        self.paper_segment = ctk.CTkOptionMenu(
             card,
             values=["AUTO", "A4", "A3", "A2", "A1", "A0"],
             variable=self.paper_var,
             height=34,
             corner_radius=7,
-            selected_color=PRIMARY,
-            selected_hover_color=PRIMARY_HOVER,
-            unselected_color=SURFACE_ALT,
-            unselected_hover_color=BORDER,
+            fg_color=SURFACE_ALT,
+            button_color="#D8E0E8",
+            button_hover_color="#C7D0D9",
             text_color=TEXT,
+            dropdown_fg_color=SURFACE,
+            dropdown_hover_color=SURFACE_ALT,
+            dropdown_text_color=TEXT,
+            font=ctk.CTkFont("Microsoft YaHei UI", 11, "bold"),
         )
         self.paper_segment.grid(row=3, column=0, padx=20, pady=(8, 20), sticky="ew")
 
@@ -281,12 +296,17 @@ class SU2CADApp:
             text_color=TEXT,
         )
         self.quality_segment.grid(row=9, column=0, padx=20, pady=(8, 14), sticky="ew")
-        ctk.CTkLabel(
+        quality_detail = ctk.CTkLabel(
             card,
             text="同时控制遮挡采样、材质细节和块线数",
             text_color=MUTED,
             font=ctk.CTkFont("Microsoft YaHei UI", 10),
-        ).grid(row=10, column=0, padx=20, pady=(0, 8), sticky="w")
+            anchor="w",
+            justify="left",
+            wraplength=250,
+        )
+        quality_detail.grid(row=10, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self.settings_detail_labels.append(quality_detail)
 
         self.advanced_button = ctk.CTkButton(
             card,
@@ -321,9 +341,27 @@ class SU2CADApp:
         frame.grid(row=row, column=0, padx=20, pady=5, sticky="ew")
         frame.grid_columnconfigure(0, weight=1)
         text = ctk.CTkFrame(frame, fg_color="transparent")
-        text.grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(text, text=title, text_color=TEXT, font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
-        ctk.CTkLabel(text, text=detail, text_color=MUTED, font=ctk.CTkFont("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(1, 0))
+        text.grid(row=0, column=0, sticky="ew")
+        text.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            text,
+            text=title,
+            text_color=TEXT,
+            font=ctk.CTkFont("Microsoft YaHei UI", 12, "bold"),
+            anchor="w",
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+        detail_label = ctk.CTkLabel(
+            text,
+            text=detail,
+            text_color=MUTED,
+            font=ctk.CTkFont("Microsoft YaHei UI", 10),
+            anchor="w",
+            justify="left",
+            wraplength=210,
+        )
+        detail_label.grid(row=1, column=0, pady=(1, 0), sticky="ew")
+        self.settings_detail_labels.append(detail_label)
         ctk.CTkSwitch(
             frame,
             text="",
@@ -574,6 +612,9 @@ class SU2CADApp:
         compact = width < COMPACT_BREAKPOINT
         available_detail_width = max(260, width - (110 if compact else 520))
         self.result_detail_label.configure(wraplength=available_detail_width)
+        settings_wrap = max(170, width - 130) if compact else 210
+        for label in self.settings_detail_labels:
+            label.configure(wraplength=settings_wrap)
         if compact == self.compact_mode:
             return
 

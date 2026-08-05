@@ -40,6 +40,9 @@ class CoreTests(unittest.TestCase):
     def test_bridge_installation_is_detectable(self) -> None:
         self.assertTrue(core.find_bridge_main().is_file())
 
+    def test_desktop_icon_exists(self) -> None:
+        self.assertTrue((core.resource_root() / "assets" / "su2cad.ico").is_file())
+
     def test_http_500_preserves_bridge_error_details(self) -> None:
         payload = {
             "ok": False,

@@ -7,12 +7,17 @@ root = Path(SPECPATH)
 sys.path.insert(0, str(root / "app"))
 sys.path.insert(0, str(root / "scripts"))
 customtkinter_data = collect_data_files("customtkinter")
+app_icon = root / "assets" / "su2cad.ico"
 
 a = Analysis(
     [str(root / "app" / "su2cad_app.py")],
     pathex=[str(root), str(root / "app"), str(root / "scripts")],
     binaries=[],
-    datas=[(str(root / "scripts" / "export_current_view.rb"), "scripts"), *customtkinter_data],
+    datas=[
+        (str(root / "scripts" / "export_current_view.rb"), "scripts"),
+        (str(app_icon), "assets"),
+        *customtkinter_data,
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -47,6 +52,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(app_icon),
 )
 
 coll = COLLECT(
