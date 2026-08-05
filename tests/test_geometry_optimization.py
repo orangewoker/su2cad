@@ -27,6 +27,8 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("visibility_state = instance_visibility_state", source)
         self.assertIn("visibility_state == :occluded", source)
         self.assertIn("visibility_state == :visible", source)
+        self.assertIn("fine: preserved_fidelity", source)
+        self.assertIn("fine ? :fine : :coarse", source)
 
     def test_balanced_simple_blocks_are_complete_and_exactly_occluded(self) -> None:
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
@@ -34,9 +36,8 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("full_fidelity = full_fidelity_block?", source)
         self.assertIn("preserved_fidelity = full_fidelity || outline_priority", source)
         self.assertIn("dense_sampling = bounded_mode && !preserved_fidelity", source)
-        self.assertIn("full_edge_occlusion = full_fidelity", source)
         self.assertIn(
-            "block_occlusion = context[:occlusion] && (full_edge_occlusion || visibility_state == :partial)",
+            "block_occlusion = context[:occlusion] && visibility_state == :partial",
             source,
         )
         self.assertIn("occlusion: block_occlusion", source)
@@ -45,6 +46,7 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("context[:light_sampling] = false", source)
         self.assertIn("context[:fidelity] = 'full'", source)
         self.assertIn("'mixed'", source)
+        self.assertIn("context[:profile][:depth_tile_pixels]", source)
         self.assertNotIn("occlusion: bounded_mode ? false : context[:occlusion]", source)
 
     def test_balanced_uses_distributed_sampling_priority_and_deadlines(self) -> None:

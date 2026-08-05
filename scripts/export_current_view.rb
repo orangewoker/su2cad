@@ -612,7 +612,16 @@ module SketchupCurrentViewCad
       full_fidelity = full_fidelity_block?(instance, context)
       outline_priority = outline_fidelity_block?(instance, world_transform, context)
       preserved_fidelity = full_fidelity || outline_priority
-      visibility_state = instance_visibility_state(instance, world_transform, context)
+      # A coarse instance-depth tile is safe for dense furniture, but it can
+      # erase an adjacent thin shelf or rail when both sample points land in
+      # the same large tile. Simple blocks are cheap enough to classify with
+      # the normal edge-resolution cache.
+      visibility_state = instance_visibility_state(
+        instance,
+        world_transform,
+        context,
+        fine: preserved_fidelity
+      )
       if visibility_state == :occluded
         context[:skipped_occluded] += 1
         context[:occluded_blocks] += 1
@@ -682,13 +691,12 @@ module SketchupCurrentViewCad
                             else
                               context[:quality] == 'light' ? 0.75 : 0.4
                             end
-      # Strict per-edge clipping is valuable early, but it must not make every
-      # later simple component miss the three-minute target. After the soft
-      # stage, wholly visible simple groups stay complete; fully covered groups
-      # were already removed by instance_visibility_state(), and partial groups
-      # continue with bounded coarse clipping.
-      full_edge_occlusion = full_fidelity && !dense_soft_deadline_exceeded?(context)
-      block_occlusion = context[:occlusion] && (full_edge_occlusion || visibility_state == :partial)
+      # Once the block-level probe says a simple component is visible, keep
+      # that component complete. Re-running every edge through a shared depth
+      # tile can erase a plain rail beside a perforated or high-poly screen.
+      # Fully covered blocks were already removed above; only genuinely partial
+      # blocks need edge-level clipping.
+      block_occlusion = context[:occlusion] && visibility_state == :partial
       block_profile = if block_occlusion &&
                          (!preserved_fidelity || dense_soft_deadline_exceeded?(context))
                         dense_occlusion_profile(context[:profile], context[:quality])
@@ -1100,7 +1108,7 @@ module SketchupCurrentViewCad
     # discarded. A mixture of covered and clear samples is marked partial so
     # simple blocks receive exact edge clipping and dense blocks receive bounded
     # coarse clipping instead of leaking all rear geometry through the facade.
-    def instance_visibility_state(instance, world_transform, context)
+    def instance_visibility_state(instance, world_transform, context, fine: false)
       return :visible unless context[:occlusion]
 
       projected = bounds_corners(instance.definition.bounds).map do |point|
@@ -1121,13 +1129,19 @@ module SketchupCurrentViewCad
       clear = 0
       direction = context[:basis][:forward]
       tolerance_mm = VISIBILITY_TOLERANCE_INCH * MM_PER_INCH
-      tile_pixels = context[:quality] == 'balanced' ? 24.0 : 32.0
+      tile_pixels = if fine
+                      [context[:profile][:depth_tile_pixels].to_f, 2.0].max
+                    else
+                      context[:quality] == 'balanced' ? 24.0 : 32.0
+                    end
       tile_mm = context[:mm_per_pixel] * tile_pixels
       depth_cache = context[:instance_depth_cache] ||= {}
       ratios.product(ratios).each do |x_ratio, y_ratio|
         x = min_x + ((max_x - min_x) * x_ratio)
         y = min_y + ((max_y - min_y) * y_ratio)
         cache_key = [
+          fine ? :fine : :coarse,
+          tile_pixels,
           ((x - viewport[:min_x]) / tile_mm).floor,
           ((y - viewport[:min_y]) / tile_mm).floor
         ]

@@ -46,7 +46,8 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Reuse already generated block definitions even after a time threshold, including section views when an instance lies wholly on the kept side of the cut plane.
 - Before expanding a block, classify it by recursively bounded definition complexity. In Balanced quality, preserve blocks at or below 6,000 expanded entities without collection sampling, mesh cleanup, or a per-block entity budget.
 - Repeat that classification at every nested child. A dense wrapper must not spend or sample away a simple child; mark child linework as full fidelity and exempt it from downstream dense-block line caps.
-- Apply exact per-edge visibility clipping to full-fidelity simple blocks. Use projected multi-point bounds testing to discard a fully covered block before traversal, and use bounded coarse clipping only for partially covered dense blocks.
+- Preserve a full-fidelity simple block intact when its projected multi-point visibility probe finds it visible. Discard a fully covered block before traversal, and apply edge-level clipping only to a genuinely partial block.
+- Classify full-fidelity simple blocks with fine screen-depth tiles. Never reuse a coarse dense-object visibility tile to discard an adjacent shelf, rail, frame, or other thin structural component.
 - Treat `MaxBlockLines` as a dense-block control. Never apply its line sampling to a block marked `optimizationClass: full`; ordinary groups, sign lettering, and other simple components must retain all merged linework.
 - Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
 - Keep desktop setting explanations fully visible beside or below their controls. In Recent Output, deleting a record must also delete its DXF after confirmation, while clearing the list must never delete files.
