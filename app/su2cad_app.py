@@ -284,15 +284,43 @@ class SU2CADApp:
             font=self._font(10, "bold"),
             dropdown_font=self._font(10),
         )
-        self.paper_segment.grid(row=1, column=0, padx=20, pady=(8, 12), sticky="ew")
+        self.paper_segment.grid(row=1, column=0, padx=20, pady=(8, 4), sticky="ew")
+        paper_detail = ctk.CTkLabel(
+            card,
+            text="AUTO 会根据图形尺寸和横竖方向自动选择 A0–A4 图幅及比例。",
+            text_color=MUTED,
+            font=self._font(9),
+            height=18,
+            anchor="w",
+            justify="left",
+            wraplength=280,
+        )
+        paper_detail.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+        self.settings_detail_labels.append(paper_detail)
 
-        self._add_switch(card, 2, "仅输出可见线", "隐藏墙后、内部及背面线条", self.occlusion_var)
-        self._add_switch(card, 3, "材质色块", "SketchUp 材质转换为 CAD 实色填充", self.materials_var)
-        self._add_switch(card, 4, "生成总尺寸", "自动标注图形总宽与总高", self.dimensions_var)
-        self._add_switch(card, 5, "完成后打开 CAD", "输出后自动切换到 AutoCAD / 天正", self.open_cad_var)
+        self._add_switch(
+            card, 3, "仅输出可见线",
+            "开启后过滤被墙体或物体遮挡的背面、内部线；关闭可加快导出。",
+            self.occlusion_var,
+        )
+        self._add_switch(
+            card, 4, "材质色块",
+            "把 SketchUp 面材质转换为 CAD 实色填充（HATCH）。",
+            self.materials_var,
+        )
+        self._add_switch(
+            card, 5, "生成总尺寸",
+            "在模型空间自动标注当前图形的总宽和总高。",
+            self.dimensions_var,
+        )
+        self._add_switch(
+            card, 6, "完成后打开 CAD",
+            "生成完成后自动用 AutoCAD 或天正打开 DXF 文件。",
+            self.open_cad_var,
+        )
 
         ctk.CTkLabel(card, text="场景精度", text_color=TEXT, font=self._font(11, "bold"), height=20).grid(
-            row=6, column=0, padx=20, pady=(10, 0), sticky="w"
+            row=7, column=0, padx=20, pady=(10, 0), sticky="w"
         )
         self.quality_segment = ctk.CTkSegmentedButton(
             card,
@@ -308,18 +336,18 @@ class SU2CADApp:
             text_color=TEXT,
             font=self._font(10),
         )
-        self.quality_segment.grid(row=7, column=0, padx=20, pady=(8, 8), sticky="ew")
+        self.quality_segment.grid(row=8, column=0, padx=20, pady=(8, 8), sticky="ew")
         quality_detail = ctk.CTkLabel(
             card,
-            text="同时控制遮挡采样、材质细节和块线数",
+            text="轻量：大模型最快；平衡：速度与细节兼顾；精细：细节最多但耗时最长。",
             text_color=MUTED,
             font=self._font(9),
             height=18,
             anchor="w",
             justify="left",
-            wraplength=250,
+            wraplength=280,
         )
-        quality_detail.grid(row=8, column=0, padx=20, pady=(0, 4), sticky="ew")
+        quality_detail.grid(row=9, column=0, padx=20, pady=(0, 4), sticky="ew")
         self.settings_detail_labels.append(quality_detail)
 
         ctk.CTkLabel(
@@ -328,7 +356,7 @@ class SU2CADApp:
             text_color=TEXT,
             font=self._font(11, "bold"),
             height=20,
-        ).grid(row=9, column=0, padx=20, pady=(8, 0), sticky="w")
+        ).grid(row=10, column=0, padx=20, pady=(8, 0), sticky="w")
         self.advanced_frame = ctk.CTkFrame(card, fg_color=SURFACE_ALT, corner_radius=8)
         self.advanced_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
@@ -347,30 +375,49 @@ class SU2CADApp:
         ).grid(
             row=0, column=1, padx=10, pady=8, sticky="e"
         )
+        max_lines_detail = ctk.CTkLabel(
+            self.advanced_frame,
+            text="限制每个高密度 CAD 块保留的细节线。数值越大越细致、文件越大；0 表示不限制。",
+            text_color=MUTED,
+            font=self._font(8),
+            anchor="w",
+            justify="left",
+            wraplength=250,
+        )
+        max_lines_detail.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew")
+        self.settings_detail_labels.append(max_lines_detail)
         strict_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        strict_row.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew")
+        strict_row.grid(row=2, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew")
         strict_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             strict_row,
-            text="严格剖切可见性",
+            text="剖切面严格遮挡",
             text_color=TEXT,
             font=self._font(9),
             height=28,
         ).grid(row=0, column=0, sticky="w")
-        self._create_toggle_button(strict_row, "严格剖切可见性", self.strict_section_var).grid(
+        self._create_toggle_button(strict_row, "剖切面严格遮挡", self.strict_section_var).grid(
             row=0, column=1, sticky="e"
         )
-        self.advanced_frame.grid(row=10, column=0, padx=20, pady=(6, 12), sticky="ew")
+        strict_detail = ctk.CTkLabel(
+            strict_row,
+            text="仅在 SketchUp 启用剖切面时生效；开启会过滤剖切后仍被遮挡的线，但处理更慢。",
+            text_color=MUTED,
+            font=self._font(8),
+            anchor="w",
+            justify="left",
+            wraplength=250,
+        )
+        strict_detail.grid(row=1, column=0, columnspan=2, pady=(0, 2), sticky="ew")
+        self.settings_detail_labels.append(strict_detail)
+        self.advanced_frame.grid(row=11, column=0, padx=20, pady=(6, 12), sticky="ew")
 
     def _add_switch(self, parent, row: int, title: str, detail: str, variable: tk.BooleanVar) -> None:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.grid(row=row, column=0, padx=20, pady=2, sticky="ew")
+        frame.grid(row=row, column=0, padx=20, pady=(2, 5), sticky="ew")
         frame.grid_columnconfigure(0, weight=1)
-        text = ctk.CTkFrame(frame, fg_color="transparent")
-        text.grid(row=0, column=0, sticky="ew")
-        text.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            text,
+            frame,
             text=title,
             text_color=TEXT,
             font=self._font(11, "bold"),
@@ -379,19 +426,19 @@ class SU2CADApp:
             justify="left",
         ).grid(row=0, column=0, sticky="ew")
         detail_label = ctk.CTkLabel(
-            text,
+            frame,
             text=detail,
             text_color=MUTED,
             font=self._font(9),
             height=18,
             anchor="w",
             justify="left",
-            wraplength=210,
+            wraplength=280,
         )
-        detail_label.grid(row=1, column=0, pady=(1, 0), sticky="ew")
+        detail_label.grid(row=1, column=0, columnspan=2, pady=(2, 0), sticky="ew")
         self.settings_detail_labels.append(detail_label)
         self._create_toggle_button(frame, title, variable).grid(
-            row=0, column=1, rowspan=2, padx=(12, 0), sticky="e"
+            row=0, column=1, padx=(12, 0), sticky="e"
         )
 
     def _create_toggle_button(
@@ -567,15 +614,38 @@ class SU2CADApp:
 
     def _build_recent_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
+        header = ctk.CTkFrame(tab, fg_color="transparent")
+        header.grid(row=0, column=0, padx=8, pady=(18, 2), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            tab,
+            header,
             text="最近生成的 CAD",
             text_color=TEXT,
             font=self._font(14, "bold"),
-        ).grid(row=0, column=0, padx=8, pady=(18, 8), sticky="w")
+        ).grid(row=0, column=0, sticky="w")
+        self.clear_recent_button = ctk.CTkButton(
+            header,
+            text="清空列表",
+            width=76,
+            height=30,
+            corner_radius=7,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER,
+            text_color=TEXT,
+            font=self._font(9),
+            command=self._clear_recent_list,
+        )
+        self.clear_recent_button.grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(
+            tab,
+            text="“删除”会同时删除磁盘上的 DXF；“清空列表”只移除记录，不删除文件。",
+            text_color=MUTED,
+            font=self._font(9),
+            anchor="w",
+        ).grid(row=1, column=0, padx=8, pady=(0, 6), sticky="ew")
         self.recent_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent", corner_radius=0)
-        self.recent_frame.grid(row=1, column=0, padx=0, pady=(0, 8), sticky="nsew")
+        self.recent_frame.grid(row=2, column=0, padx=0, pady=(0, 8), sticky="nsew")
         self.recent_frame.grid_columnconfigure(0, weight=1)
 
     def _build_footer(self) -> None:
@@ -685,7 +755,7 @@ class SU2CADApp:
         compact = width < COMPACT_BREAKPOINT
         available_detail_width = max(260, width - (110 if compact else 520))
         self.result_detail_label.configure(wraplength=available_detail_width)
-        settings_wrap = max(170, width - 130) if compact else 210
+        settings_wrap = min(max(220, width - 100), 620) if compact else 280
         for label in self.settings_detail_labels:
             label.configure(wraplength=settings_wrap)
         self._schedule_settings_scrollbar_update()
@@ -1022,6 +1092,7 @@ class SU2CADApp:
         for widget in self.recent_frame.winfo_children():
             widget.destroy()
         recent = self.saved.get("recent", [])
+        self.clear_recent_button.configure(state="normal" if recent else "disabled")
         if not recent:
             ctk.CTkLabel(
                 self.recent_frame,
@@ -1052,14 +1123,61 @@ class SU2CADApp:
             ctk.CTkButton(
                 row,
                 text="打开",
-                width=64,
+                width=56,
                 height=30,
                 fg_color=SURFACE,
                 hover_color=BORDER,
                 text_color=TEXT,
                 font=self._font(10),
                 command=lambda selected=path: self._open_path(selected),
-            ).grid(row=0, column=1, rowspan=2, padx=12, pady=10)
+            ).grid(row=0, column=1, rowspan=2, padx=(8, 4), pady=10)
+            ctk.CTkButton(
+                row,
+                text="删除",
+                width=56,
+                height=30,
+                fg_color=ERROR_SOFT,
+                hover_color="#F7D9DC",
+                text_color=ERROR,
+                font=self._font(10),
+                command=lambda selected=path: self._delete_recent(selected),
+            ).grid(row=0, column=2, rowspan=2, padx=(4, 12), pady=10)
+
+    def _delete_recent(self, path: Path) -> None:
+        confirmed = messagebox.askyesno(
+            "删除输出",
+            f"将从列表中移除并永久删除这个 DXF 文件：\n\n{path.name}\n\n是否继续？",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            messagebox.showerror("删除失败", f"无法删除文件：\n{path}\n\n{exc}", parent=self.root)
+            return
+
+        self.saved["recent"] = [
+            item for item in self.saved.get("recent", [])
+            if item.get("path") != str(path)
+        ]
+        self._save_settings()
+        self._rebuild_recent()
+
+    def _clear_recent_list(self) -> None:
+        if not self.saved.get("recent", []):
+            return
+        confirmed = messagebox.askyesno(
+            "清空输出列表",
+            "只清空最近输出记录，不会删除磁盘上的任何 DXF 文件。\n\n是否继续？",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        self.saved["recent"] = []
+        self._save_settings()
+        self._rebuild_recent()
 
     def _open_path(self, path: Path) -> None:
         if not path.exists():

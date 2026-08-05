@@ -80,6 +80,7 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertIsInstance(app.paper_segment, ctk.CTkOptionMenu)
             self.assertEqual(app.paper_segment.cget("values"), ["AUTO", "A4", "A3", "A2", "A1", "A0"])
             self.assertGreaterEqual(len(app.settings_detail_labels), 5)
+            self.assertTrue(all(label.cget("wraplength") >= 250 for label in app.settings_detail_labels))
             self.assertEqual(app.advanced_frame.winfo_manager(), "grid")
             self.assertFalse(hasattr(app, "advanced_button"))
             self.assertEqual(app.export_button.cget("fg_color"), "#16A36A")
@@ -107,6 +108,26 @@ class AppWorkflowTests(unittest.TestCase):
             app._apply_responsive_layout(1180)
             self.assertFalse(app.compact_mode)
             self.assertEqual(app.workspace_card.grid_info()["column"], 1)
+
+            app._add_recent(result)
+            self.assertTrue(output.exists())
+            with patch("su2cad_app.messagebox.askyesno", return_value=True):
+                app._delete_recent(output)
+            self.assertFalse(output.exists())
+            self.assertFalse(any(item.get("path") == str(output) for item in app.saved.get("recent", [])))
+
+            preserved = Path(temporary) / "preserved.dxf"
+            preserved.write_bytes(b"DXF")
+            app.saved["recent"] = [
+                {"path": str(preserved), "time": "now", "layout": "A4-L", "size": "0.1 MB"}
+            ]
+            app._save_settings()
+            app._rebuild_recent()
+            with patch("su2cad_app.messagebox.askyesno", return_value=True):
+                app._clear_recent_list()
+            self.assertTrue(preserved.exists())
+            self.assertEqual(app.saved.get("recent"), [])
+            self.assertEqual(app.clear_recent_button.cget("state"), "disabled")
             root.destroy()
 
 

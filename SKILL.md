@@ -38,6 +38,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - In Light quality, distribute a block's traversal budget across child instances by projected footprint. Always reserve enough geometry for large furniture bodies before spending detail on tiny high-poly wheels, screws, tufting, and decorations.
 - In Balanced quality, reuse fully visible planar block definitions and apply a 40,000-entity block budget plus a 24,000-entity collection sample limit. Reserve unbounded per-edge occlusion for Precise quality so repeated furniture does not expand into millions of duplicate operations.
 - Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
+- Keep desktop setting explanations fully visible beside or below their controls. In Recent Output, deleting a record must also delete its DXF after confirmation, while clearing the list must never delete files.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
 - Merge collinear fragments and write curves as one CAD circle, arc, spline, or polyline object.
