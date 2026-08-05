@@ -42,6 +42,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - In Balanced quality, order root geometry as primitives, complete simple blocks, planar outline/text blocks, then dense blocks from largest projected footprint to smallest.
 - Preserve planar lettering and logos up to a bounded 150,000 recursively expanded entities as complete outline geometry with mesh-seam cleanup.
 - Use 72/105/135-second Balanced extraction stages: normal dense detail, compact real-geometry outlines, then stop only the remaining smallest uncached dense objects. Never apply this deadline degradation to simple or protected outline blocks.
+- In a strict section view, use exact full-block edge clipping before the soft deadline. After it, keep fully visible simple blocks complete, discard fully covered blocks by the instance grid, and coarsely clip only partial blocks.
 - Reuse already generated block definitions even after a time threshold, including section views when an instance lies wholly on the kept side of the cut plane.
 - Before expanding a block, classify it by recursively bounded definition complexity. In Balanced quality, preserve blocks at or below 6,000 expanded entities without collection sampling, mesh cleanup, or a per-block entity budget.
 - Repeat that classification at every nested child. A dense wrapper must not spend or sample away a simple child; mark child linework as full fidelity and exempt it from downstream dense-block line caps.

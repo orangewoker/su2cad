@@ -682,8 +682,15 @@ module SketchupCurrentViewCad
                             else
                               context[:quality] == 'light' ? 0.75 : 0.4
                             end
-      block_occlusion = context[:occlusion] && (full_fidelity || visibility_state == :partial)
-      block_profile = if block_occlusion && !preserved_fidelity
+      # Strict per-edge clipping is valuable early, but it must not make every
+      # later simple component miss the three-minute target. After the soft
+      # stage, wholly visible simple groups stay complete; fully covered groups
+      # were already removed by instance_visibility_state(), and partial groups
+      # continue with bounded coarse clipping.
+      full_edge_occlusion = full_fidelity && !dense_soft_deadline_exceeded?(context)
+      block_occlusion = context[:occlusion] && (full_edge_occlusion || visibility_state == :partial)
+      block_profile = if block_occlusion &&
+                         (!preserved_fidelity || dense_soft_deadline_exceeded?(context))
                         dense_occlusion_profile(context[:profile], context[:quality])
                       else
                         context[:profile]

@@ -34,8 +34,9 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("full_fidelity = full_fidelity_block?", source)
         self.assertIn("preserved_fidelity = full_fidelity || outline_priority", source)
         self.assertIn("dense_sampling = bounded_mode && !preserved_fidelity", source)
+        self.assertIn("full_edge_occlusion = full_fidelity", source)
         self.assertIn(
-            "block_occlusion = context[:occlusion] && (full_fidelity || visibility_state == :partial)",
+            "block_occlusion = context[:occlusion] && (full_edge_occlusion || visibility_state == :partial)",
             source,
         )
         self.assertIn("occlusion: block_occlusion", source)
