@@ -15,7 +15,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -290,7 +290,7 @@ def _extract_geometry_chunked(
                 # Entity totals are not known without another expensive full traversal.
                 # Keep extraction progress bounded and report the real processed count.
                 estimated = min(58, 12 + int(46 * processed / (processed + 12_000)))
-                entity_label = "代表实体" if quality == "light" else "实体"
+                entity_label = "代表实体" if quality in {"light", "balanced"} else "实体"
                 progress(estimated, f"正在提取当前视图几何 · 已计算 {processed:,} 个{entity_label}")
                 last_reported = processed
             if step.get("done"):

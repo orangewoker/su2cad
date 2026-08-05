@@ -14,6 +14,8 @@ module SketchupCurrentViewCad
   MAX_TOLERATED_RAY_ERRORS = 20
   LIGHT_BLOCK_ENTITY_BUDGET = 20_000
   LIGHT_ENTITY_SAMPLES_PER_COLLECTION = 12_000
+  BALANCED_BLOCK_ENTITY_BUDGET = 40_000
+  BALANCED_ENTITY_SAMPLES_PER_COLLECTION = 24_000
   LIGHT_UNIQUE_COMPONENT_THRESHOLD = 100_000
   EXPORT_SESSIONS = {}
   QUALITY_PROFILES = {
@@ -398,13 +400,14 @@ module SketchupCurrentViewCad
       return cached if cached
 
       count = entities.respond_to?(:length) ? entities.length.to_i : 0
-      if count <= LIGHT_ENTITY_SAMPLES_PER_COLLECTION
+      sample_limit = context[:entity_sample_limit] || LIGHT_ENTITY_SAMPLES_PER_COLLECTION
+      if count <= sample_limit
         selected = entities.to_a
       else
         selected = []
         entities.each do |entity|
           selected << entity
-          break if selected.length >= LIGHT_ENTITY_SAMPLES_PER_COLLECTION
+          break if selected.length >= sample_limit
         end
         context[:skipped_sampled] += [count - selected.length, 0].max
       end
@@ -438,8 +441,8 @@ module SketchupCurrentViewCad
     end
 
     def emit_instance_block(instance, world_transform, outer_tag, outer_material, context)
-      light_mode = context[:quality] == 'light'
-      cacheable = light_mode && !context[:section] &&
+      bounded_mode = bounded_block_quality?(context[:quality])
+      cacheable = bounded_mode && !context[:section] &&
                   instance_fully_inside_view?(instance, world_transform, context)
       cache_key = if cacheable
                     light_block_cache_key(instance, world_transform, outer_tag, outer_material)
@@ -476,7 +479,10 @@ module SketchupCurrentViewCad
         end
       end
 
-      dense_sampling = light_mode
+      dense_sampling = bounded_mode
+      entity_budget = block_entity_budget(context[:quality])
+      sample_limit = entity_sample_limit(context[:quality])
+      mesh_cleanup_pixels = context[:quality] == 'light' ? 0.75 : 0.4
 
       block_context = {
         model: context[:model],
@@ -487,7 +493,7 @@ module SketchupCurrentViewCad
         # Full per-edge ray tests are still intentionally avoided in Light mode;
         # local face-facing and micro-mesh cleanup removes hidden/internal detail
         # without turning a two-minute export into an hours-long operation.
-        occlusion: light_mode ? false : context[:occlusion],
+        occlusion: bounded_mode ? false : context[:occlusion],
         visibility_cache: context[:visibility_cache],
         depth_cache: context[:depth_cache],
         processed_curves: {},
@@ -509,7 +515,9 @@ module SketchupCurrentViewCad
         cooperative: context[:cooperative],
         light_sampling: dense_sampling,
         light_mesh_cleanup: dense_sampling,
-        light_entity_budget: dense_sampling ? { remaining: LIGHT_BLOCK_ENTITY_BUDGET } : nil,
+        mesh_cleanup_pixels: mesh_cleanup_pixels,
+        entity_sample_limit: sample_limit,
+        light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil,
         light_budget_exhausted: false,
         skipped_hidden: 0,
         skipped_offscreen: 0,
@@ -583,6 +591,18 @@ module SketchupCurrentViewCad
       :emitted
     rescue StandardError
       :fallback
+    end
+
+    def bounded_block_quality?(quality)
+      quality == 'light' || quality == 'balanced'
+    end
+
+    def block_entity_budget(quality)
+      quality == 'balanced' ? BALANCED_BLOCK_ENTITY_BUDGET : LIGHT_BLOCK_ENTITY_BUDGET
+    end
+
+    def entity_sample_limit(quality)
+      quality == 'balanced' ? BALANCED_ENTITY_SAMPLES_PER_COLLECTION : LIGHT_ENTITY_SAMPLES_PER_COLLECTION
     end
 
     def append_block_reference(
@@ -909,7 +929,8 @@ module SketchupCurrentViewCad
         projected_start = project(start_point, context[:basis])
         projected_end = project(end_point, context[:basis])
         projected_length = Math.sqrt(distance2(projected_start, projected_end))
-        micro_threshold = [context[:mm_per_pixel].to_f * 0.75, 2.0].max
+        cleanup_pixels = context[:mesh_cleanup_pixels] || 0.75
+        micro_threshold = [context[:mm_per_pixel].to_f * cleanup_pixels, 2.0].max
         same_material = faces.map { |face| face_material_key(face, normal_facing_dot(face, transform, context)) }.uniq.length <= 1
         coplanar = normals.combination(2).all? { |a, b| a.dot(b).abs > 0.9999 }
         return nil if projected_length < micro_threshold

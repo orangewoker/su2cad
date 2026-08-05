@@ -36,6 +36,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - In the desktop app, run SketchUp extraction as short resumable steps so progress and cancellation remain responsive and one long HTTP request cannot time out the whole scene.
 - In Light quality, never expand millions of repeated component entities. Cache bounded real geometry per definition and reuse it through CAD INSERT rotation, mirroring, and scaling; do not invent bounding-polygon proxy blocks.
 - In Light quality, distribute a block's traversal budget across child instances by projected footprint. Always reserve enough geometry for large furniture bodies before spending detail on tiny high-poly wheels, screws, tufting, and decorations.
+- In Balanced quality, reuse fully visible planar block definitions and apply a 40,000-entity block budget plus a 24,000-entity collection sample limit. Reserve unbounded per-edge occlusion for Precise quality so repeated furniture does not expand into millions of duplicate operations.
 - Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.

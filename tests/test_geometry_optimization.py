@@ -17,6 +17,14 @@ from build_dxf import (  # noqa: E402
 
 
 class GeometryOptimizationTests(unittest.TestCase):
+    def test_balanced_mode_has_bounded_reusable_block_extraction(self) -> None:
+        source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
+        self.assertIn("BALANCED_BLOCK_ENTITY_BUDGET = 40_000", source)
+        self.assertIn("BALANCED_ENTITY_SAMPLES_PER_COLLECTION = 24_000", source)
+        self.assertIn("bounded_mode = bounded_block_quality?(context[:quality])", source)
+        self.assertIn("cacheable = bounded_mode", source)
+        self.assertIn("occlusion: bounded_mode ? false : context[:occlusion]", source)
+
     def test_dense_furniture_keeps_boundaries_and_removes_micro_mesh(self) -> None:
         boundaries = [
             Segment((0.0, 0.0), (1000.0, 0.0), "SU-FURNITURE", "boundary"),
