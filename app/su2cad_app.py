@@ -1018,6 +1018,12 @@ class SU2CADApp:
                         f"{result.block_references} 个块参照，审计错误 {result.audit_errors}，"
                         f"总耗时 {self._format_elapsed(result.elapsed_seconds)}"
                     )
+                    fidelity = (
+                        f"完整简单对象 {result.full_fidelity_blocks}，"
+                        f"优化复杂块 {result.optimized_dense_blocks}，"
+                        f"遮挡剔除 {result.occluded_blocks}"
+                    )
+                    detail = f"{detail} · {fidelity}"
                     if result.warnings:
                         detail = f"{detail} · {result.warnings[0]}"
                         self._log(result.warnings[0])

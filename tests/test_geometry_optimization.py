@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from build_dxf import (  # noqa: E402
     Segment,
     merge_collinear,
+    optimize_block_segments,
     segment_length,
     simplify_dense_furniture_segments,
 )
@@ -23,7 +24,26 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("BALANCED_ENTITY_SAMPLES_PER_COLLECTION = 24_000", source)
         self.assertIn("bounded_mode = bounded_block_quality?(context[:quality])", source)
         self.assertIn("cacheable = bounded_mode", source)
-        self.assertIn("occlusion: bounded_mode ? false : context[:occlusion]", source)
+        self.assertIn("visibility_state = instance_visibility_state", source)
+        self.assertIn("visibility_state == :occluded", source)
+        self.assertIn("visibility_state == :visible", source)
+
+    def test_balanced_simple_blocks_are_complete_and_exactly_occluded(self) -> None:
+        source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
+        self.assertIn("BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD = 6_000", source)
+        self.assertIn("full_fidelity = full_fidelity_block?", source)
+        self.assertIn("dense_sampling = bounded_mode && !full_fidelity", source)
+        self.assertIn(
+            "block_occlusion = context[:occlusion] && (full_fidelity || visibility_state == :partial)",
+            source,
+        )
+        self.assertIn("occlusion: block_occlusion", source)
+        self.assertIn("light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil", source)
+        self.assertIn("if full_fidelity_block?(entity, context)", source)
+        self.assertIn("context[:light_sampling] = false", source)
+        self.assertIn("context[:fidelity] = 'full'", source)
+        self.assertIn("'mixed'", source)
+        self.assertNotIn("occlusion: bounded_mode ? false : context[:occlusion]", source)
 
     def test_dense_furniture_keeps_boundaries_and_removes_micro_mesh(self) -> None:
         boundaries = [
@@ -65,6 +85,50 @@ class GeometryOptimizationTests(unittest.TestCase):
         )
         self.assertEqual(len(merged), 2)
         self.assertEqual({segment.role for segment in merged}, {"boundary", "hard"})
+
+    def test_full_fidelity_block_ignores_dense_line_cap(self) -> None:
+        segments = [
+            Segment((float(index), 0.0), (float(index), 100.0), "SU-SIGN", "hard")
+            for index in range(3000)
+        ]
+        output, changed = optimize_block_segments(
+            segments,
+            800,
+            plant=False,
+            optimization_class="full",
+        )
+        self.assertFalse(changed)
+        self.assertEqual(output, segments)
+
+    def test_mixed_block_never_samples_simple_child_lines(self) -> None:
+        protected = [
+            Segment(
+                (float(index), 0.0),
+                (float(index), 100.0),
+                "SU-SIGN-TEXT",
+                "hard",
+                "full",
+            )
+            for index in range(1200)
+        ]
+        dense = [
+            Segment(
+                (float(index), 200.0),
+                (float(index) + 0.25, 200.25),
+                "SU-MESH",
+                "hard",
+                "dense",
+            )
+            for index in range(4000)
+        ]
+        output, changed = optimize_block_segments(
+            protected + dense,
+            800,
+            plant=False,
+            optimization_class="mixed",
+        )
+        self.assertTrue(changed)
+        self.assertTrue(set(protected).issubset(output))
 
 
 if __name__ == "__main__":

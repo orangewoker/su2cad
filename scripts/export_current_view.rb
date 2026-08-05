@@ -16,6 +16,8 @@ module SketchupCurrentViewCad
   LIGHT_ENTITY_SAMPLES_PER_COLLECTION = 12_000
   BALANCED_BLOCK_ENTITY_BUDGET = 40_000
   BALANCED_ENTITY_SAMPLES_PER_COLLECTION = 24_000
+  LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD = 1_000
+  BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD = 6_000
   LIGHT_UNIQUE_COMPONENT_THRESHOLD = 100_000
   EXPORT_SESSIONS = {}
   QUALITY_PROFILES = {
@@ -69,6 +71,7 @@ module SketchupCurrentViewCad
         occlusion: effective_occlusion,
         visibility_cache: {},
         depth_cache: {},
+        instance_depth_cache: {},
         processed_curves: {},
         lines: [],
         curves: [],
@@ -79,6 +82,7 @@ module SketchupCurrentViewCad
         light_block_cache: {},
         light_planar_block_cache: {},
         light_entity_collections: {},
+        definition_complexity_cache: {},
         block_mode: true,
         emit_materials: materials,
         material_prefilter: true,
@@ -86,12 +90,17 @@ module SketchupCurrentViewCad
         quality: quality.to_s,
         mm_per_pixel: [mm_per_pixel, 1.0e-6].max,
         cooperative: cooperative,
+        fidelity: 'full',
         light_sampling: false,
         light_entity_budget: nil,
         skipped_hidden: 0,
         skipped_offscreen: 0,
         skipped_sampled: 0,
         reused_block_references: 0,
+        full_fidelity_blocks: 0,
+        full_fidelity_children: 0,
+        optimized_dense_blocks: 0,
+        occluded_blocks: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -150,6 +159,10 @@ module SketchupCurrentViewCad
           blocks: context[:blocks].length,
           blockReferences: context[:block_references].length,
           reusedBlockReferences: context[:reused_block_references],
+          fullFidelityBlocks: context[:full_fidelity_blocks],
+          fullFidelityChildren: context[:full_fidelity_children],
+          optimizedDenseBlocks: context[:optimized_dense_blocks],
+          occludedBlocks: context[:occluded_blocks],
           occlusion: effective_occlusion,
           requestedOcclusion: occlusion,
           strictSectionOcclusion: strict_section_occlusion,
@@ -352,6 +365,23 @@ module SketchupCurrentViewCad
 
     def walk_light_child_entities(entity, world_transform, child_tag, child_material, context, plan)
       shared_budget = context[:light_entity_budget]
+      if full_fidelity_block?(entity, context)
+        context[:full_fidelity_children] += 1
+        previous_sampling = context[:light_sampling]
+        previous_cleanup = context[:light_mesh_cleanup]
+        previous_fidelity = context[:fidelity]
+        previous_occlusion = context[:occlusion]
+        previous_profile = context[:profile]
+        context[:light_entity_budget] = nil
+        context[:light_sampling] = false
+        context[:light_mesh_cleanup] = false
+        context[:fidelity] = 'full'
+        context[:occlusion] = context[:requested_occlusion] unless context[:requested_occlusion].nil?
+        context[:profile] = context[:full_fidelity_profile] if context[:full_fidelity_profile]
+        walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
+        return
+      end
+
       weight = plan[:weights][entity.object_id] || 1.0
       available = [shared_budget[:remaining] - plan[:primitive_reserve], 0].max
       remaining_weight = [plan[:remaining_weight], weight].max
@@ -373,6 +403,11 @@ module SketchupCurrentViewCad
       used = quota - child_budget[:remaining]
       shared_budget[:remaining] -= used
     ensure
+      context[:light_sampling] = previous_sampling unless previous_sampling.nil?
+      context[:light_mesh_cleanup] = previous_cleanup unless previous_cleanup.nil?
+      context[:fidelity] = previous_fidelity unless previous_fidelity.nil?
+      context[:occlusion] = previous_occlusion unless previous_occlusion.nil?
+      context[:profile] = previous_profile unless previous_profile.nil?
       context[:light_entity_budget] = shared_budget if shared_budget
     end
 
@@ -442,8 +477,19 @@ module SketchupCurrentViewCad
 
     def emit_instance_block(instance, world_transform, outer_tag, outer_material, context)
       bounded_mode = bounded_block_quality?(context[:quality])
+      full_fidelity = full_fidelity_block?(instance, context)
+      visibility_state = instance_visibility_state(instance, world_transform, context)
+      if visibility_state == :occluded
+        context[:skipped_occluded] += 1
+        context[:occluded_blocks] += 1
+        return :occluded
+      end
+
+      context[:full_fidelity_blocks] += 1 if full_fidelity
+      context[:optimized_dense_blocks] += 1 unless full_fidelity
       cacheable = bounded_mode && !context[:section] &&
-                  instance_fully_inside_view?(instance, world_transform, context)
+                  instance_fully_inside_view?(instance, world_transform, context) &&
+                  !full_fidelity && visibility_state == :visible
       cache_key = if cacheable
                     light_block_cache_key(instance, world_transform, outer_tag, outer_material)
                   end
@@ -479,10 +525,16 @@ module SketchupCurrentViewCad
         end
       end
 
-      dense_sampling = bounded_mode
+      dense_sampling = bounded_mode && !full_fidelity
       entity_budget = block_entity_budget(context[:quality])
       sample_limit = entity_sample_limit(context[:quality])
       mesh_cleanup_pixels = context[:quality] == 'light' ? 0.75 : 0.4
+      block_occlusion = context[:occlusion] && (full_fidelity || visibility_state == :partial)
+      block_profile = if block_occlusion && !full_fidelity
+                        dense_occlusion_profile(context[:profile], context[:quality])
+                      else
+                        context[:profile]
+                      end
 
       block_context = {
         model: context[:model],
@@ -490,12 +542,14 @@ module SketchupCurrentViewCad
         viewport: context[:viewport],
         section: context[:section],
         ray_distance: context[:ray_distance],
-        # Full per-edge ray tests are still intentionally avoided in Light mode;
-        # local face-facing and micro-mesh cleanup removes hidden/internal detail
-        # without turning a two-minute export into an hours-long operation.
-        occlusion: bounded_mode ? false : context[:occlusion],
+        # Simple groups are always emitted completely and use normal per-edge
+        # visibility clipping. Dense groups keep their bounded geometry budget;
+        # only partially covered dense instances use a coarse visibility profile.
+        occlusion: block_occlusion,
+        requested_occlusion: context[:occlusion],
         visibility_cache: context[:visibility_cache],
         depth_cache: context[:depth_cache],
+        instance_depth_cache: context[:instance_depth_cache],
         processed_curves: {},
         lines: [],
         curves: [],
@@ -506,13 +560,16 @@ module SketchupCurrentViewCad
         light_block_cache: context[:light_block_cache],
         light_planar_block_cache: context[:light_planar_block_cache],
         light_entity_collections: context[:light_entity_collections],
+        definition_complexity_cache: context[:definition_complexity_cache],
         block_mode: false,
         emit_materials: context[:emit_materials],
         material_prefilter: true,
-        profile: context[:profile],
+        profile: block_profile,
+        full_fidelity_profile: context[:profile],
         quality: context[:quality],
         mm_per_pixel: context[:mm_per_pixel],
         cooperative: context[:cooperative],
+        fidelity: full_fidelity ? 'full' : 'dense',
         light_sampling: dense_sampling,
         light_mesh_cleanup: dense_sampling,
         mesh_cleanup_pixels: mesh_cleanup_pixels,
@@ -523,6 +580,10 @@ module SketchupCurrentViewCad
         skipped_offscreen: 0,
         skipped_sampled: 0,
         reused_block_references: 0,
+        full_fidelity_blocks: 0,
+        full_fidelity_children: 0,
+        optimized_dense_blocks: 0,
+        occluded_blocks: 0,
         skipped_occluded: 0,
         skipped_material_faces: 0,
         material_faces: 0,
@@ -543,7 +604,16 @@ module SketchupCurrentViewCad
       normalized = normalize_block_geometry(block_context[:lines], block_context[:curves], block_context[:fills])
       return :fallback unless normalized
 
+      contains_full_fidelity = block_context[:lines].any? { |line| line[:fidelity] == 'full' }
+      optimization_class = if full_fidelity
+                             'full'
+                           elsif contains_full_fidelity
+                             'mixed'
+                           else
+                             'dense'
+                           end
       geometry_hash = block_geometry_hash(normalized[:lines], normalized[:curves], normalized[:fills])
+      geometry_hash = Digest::SHA1.hexdigest("#{geometry_hash}:#{optimization_class}")
       source_name = instance.name.to_s.empty? ? instance.definition.name.to_s : instance.name.to_s
       block_name = context[:block_hashes][geometry_hash]
       unless block_name
@@ -555,6 +625,7 @@ module SketchupCurrentViewCad
           sourceName: source_name,
           definitionId: instance.definition.persistent_id,
           geometryHash: geometry_hash,
+          optimizationClass: optimization_class,
            lines: normalized[:lines],
            curves: normalized[:curves],
            fills: normalized[:fills]
@@ -588,6 +659,7 @@ module SketchupCurrentViewCad
       context[:skipped_material_faces] += block_context[:skipped_material_faces]
       context[:material_faces] += block_context[:material_faces]
       context[:ray_errors] += block_context[:ray_errors]
+      context[:full_fidelity_children] += block_context[:full_fidelity_children]
       :emitted
     rescue StandardError
       :fallback
@@ -595,6 +667,57 @@ module SketchupCurrentViewCad
 
     def bounded_block_quality?(quality)
       quality == 'light' || quality == 'balanced'
+    end
+
+    def full_fidelity_block?(instance, context)
+      return true unless bounded_block_quality?(context[:quality])
+
+      threshold = context[:quality] == 'balanced' ?
+                    BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD :
+                    LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD
+      definition_complexity(instance.definition, context, threshold) <= threshold
+    rescue StandardError
+      false
+    end
+
+    def definition_complexity(definition, context, limit, visiting = {})
+      cache = context[:definition_complexity_cache] ||= {}
+      key = [definition.persistent_id, limit]
+      cached = cache[key]
+      return cached if cached
+      return limit + 1 if visiting[definition.object_id]
+
+      visiting[definition.object_id] = true
+      count = 0
+      definition.entities.each do |entity|
+        count += 1
+        if entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+          count += definition_complexity(entity.definition, context, limit, visiting)
+        end
+        break if count > limit
+      end
+      visiting.delete(definition.object_id)
+      cache[key] = [count, limit + 1].min
+    ensure
+      visiting.delete(definition.object_id) if definition
+    end
+
+    def dense_occlusion_profile(profile, quality)
+      if quality == 'balanced'
+        profile.merge(
+          sample_pixels: [profile[:sample_pixels], 8.0].max,
+          max_visibility_intervals: [profile[:max_visibility_intervals], 4].min,
+          max_clip_depth: [profile[:max_clip_depth], 3].min,
+          depth_tile_pixels: [profile[:depth_tile_pixels], 6.0].max
+        )
+      else
+        profile.merge(
+          sample_pixels: [profile[:sample_pixels], 12.0].max,
+          max_visibility_intervals: [profile[:max_visibility_intervals], 2].min,
+          max_clip_depth: [profile[:max_clip_depth], 2].min,
+          depth_tile_pixels: [profile[:depth_tile_pixels], 8.0].max
+        )
+      end
     end
 
     def block_entity_budget(quality)
@@ -730,6 +853,64 @@ module SketchupCurrentViewCad
       false
     end
 
+    # Test the whole projected instance before expanding its definition. This is
+    # deliberately conservative: only a block covered at every grid sample is
+    # discarded. A mixture of covered and clear samples is marked partial so
+    # simple blocks receive exact edge clipping and dense blocks receive bounded
+    # coarse clipping instead of leaking all rear geometry through the facade.
+    def instance_visibility_state(instance, world_transform, context)
+      return :visible unless context[:occlusion]
+
+      projected = bounds_corners(instance.definition.bounds).map do |point|
+        project(point.transform(world_transform), context[:basis])
+      end
+      viewport = context[:viewport]
+      min_x = [projected.map { |point| point[0] }.min, viewport[:min_x]].max
+      max_x = [projected.map { |point| point[0] }.max, viewport[:max_x]].min
+      min_y = [projected.map { |point| point[1] }.min, viewport[:min_y]].max
+      max_y = [projected.map { |point| point[1] }.max, viewport[:max_y]].min
+      return :visible if min_x >= max_x || min_y >= max_y
+
+      nearest_depth = projected.map { |point| point[2].to_f }.max
+      ratios = context[:quality] == 'balanced' ?
+                 [0.08, 0.5, 0.92] :
+                 [0.15, 0.5, 0.85]
+      covered = 0
+      clear = 0
+      direction = context[:basis][:forward]
+      tolerance_mm = VISIBILITY_TOLERANCE_INCH * MM_PER_INCH
+      tile_pixels = context[:quality] == 'balanced' ? 24.0 : 32.0
+      tile_mm = context[:mm_per_pixel] * tile_pixels
+      depth_cache = context[:instance_depth_cache] ||= {}
+      ratios.product(ratios).each do |x_ratio, y_ratio|
+        x = min_x + ((max_x - min_x) * x_ratio)
+        y = min_y + ((max_y - min_y) * y_ratio)
+        cache_key = [
+          ((x - viewport[:min_x]) / tile_mm).floor,
+          ((y - viewport[:min_y]) / tile_mm).floor
+        ]
+        if depth_cache.key?(cache_key)
+          hit_depth = depth_cache[cache_key]
+        else
+          point = unproject(x, y, nearest_depth, context[:basis])
+          origin = ray_origin(point, direction, context)
+          hit = raytest_with_retry(context[:model], origin, direction)
+          hit_depth = hit && project(hit[0], context[:basis])[2].to_f
+          depth_cache[cache_key] = hit_depth
+        end
+        if hit_depth && hit_depth > nearest_depth + tolerance_mm
+          covered += 1
+        else
+          clear += 1
+        end
+        return :partial if covered.positive? && clear.positive?
+      end
+      covered.positive? && clear.zero? ? :occluded : :visible
+    rescue StandardError
+      context[:ray_errors] += 1
+      :partial
+    end
+
     def instance_intersects_view?(instance, world_transform, context)
       points = bounds_corners(instance.definition.bounds).map { |point| point.transform(world_transform) }
       section = context[:section]
@@ -792,7 +973,7 @@ module SketchupCurrentViewCad
 
     def block_geometry_hash(lines, curves, fills)
       line_keys = lines.map do |line|
-        [line[:layer], [line[:start].first(2), line[:end].first(2)].sort]
+        [line[:layer], line[:fidelity], [line[:start].first(2), line[:end].first(2)].sort]
       end.sort_by(&:to_s)
       curve_keys = curves.map do |curve|
         [curve[:layer], curve[:curveType], curve[:closed], curve[:points].map { |point| point.first(2) }]
@@ -883,7 +1064,13 @@ module SketchupCurrentViewCad
         next unless clipped
         next if distance2(clipped[0], clipped[1]) < 0.01
 
-        context[:lines] << { start: clipped[0], end: clipped[1], layer: tag, edgeRole: edge_role }
+        context[:lines] << {
+          start: clipped[0],
+          end: clipped[1],
+          layer: tag,
+          edgeRole: edge_role,
+          fidelity: context[:fidelity] || 'full'
+        }
       end
     end
 
@@ -1097,7 +1284,8 @@ module SketchupCurrentViewCad
             end: clipped[1],
             layer: 'SUCAD-SECTION',
             section: true,
-            edgeRole: 'section'
+            edgeRole: 'section',
+            fidelity: 'full'
           }
           context[:section_lines] += 1
         end
@@ -1538,6 +1726,12 @@ module SketchupCurrentViewCad
         (delta.dot(basis[:up]) * MM_PER_INCH).round(4),
         (-delta.dot(basis[:forward]) * MM_PER_INCH).round(4)
       ]
+    end
+
+    def unproject(x, y, depth, basis)
+      point = basis[:origin].offset(basis[:right], x.to_f / MM_PER_INCH)
+      point = point.offset(basis[:up], y.to_f / MM_PER_INCH)
+      point.offset(basis[:forward].reverse, depth.to_f / MM_PER_INCH)
     end
 
     def entity_visible?(entity)

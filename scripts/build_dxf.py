@@ -60,6 +60,7 @@ class Segment:
     end: tuple[float, float]
     layer: str
     role: str = "hard"
+    fidelity: str = "dense"
 
 
 @dataclass(frozen=True)
@@ -154,11 +155,12 @@ def normalize_segment(raw: dict) -> Segment | None:
         end,
         clean_layer(raw.get("layer", "Untagged")),
         str(raw.get("edgeRole") or "hard"),
+        str(raw.get("fidelity") or "dense"),
     )
 
 
 def merge_collinear(segments: list[Segment], angle_tol: float = 1e-5, gap_tol: float = 0.2) -> list[Segment]:
-    groups: dict[tuple[str, str, int, int], list[tuple[float, float, float, float]]] = {}
+    groups: dict[tuple[str, str, str, int, int], list[tuple[float, float, float, float]]] = {}
     for segment in segments:
         x1, y1 = segment.start
         x2, y2 = segment.end
@@ -171,12 +173,12 @@ def merge_collinear(segments: list[Segment], angle_tol: float = 1e-5, gap_tol: f
             ux, uy = -ux, -uy
         angle_key = round(math.atan2(uy, ux) / angle_tol)
         intercept = x1 * uy - y1 * ux
-        key = (segment.layer, segment.role, angle_key, round(intercept / 0.05))
+        key = (segment.layer, segment.role, segment.fidelity, angle_key, round(intercept / 0.05))
         t1, t2 = x1 * ux + y1 * uy, x2 * ux + y2 * uy
         groups.setdefault(key, []).append((min(t1, t2), max(t1, t2), ux, uy))
 
     output: list[Segment] = []
-    for (layer, role, _angle, intercept_key), spans in groups.items():
+    for (layer, role, fidelity, _angle, intercept_key), spans in groups.items():
         spans.sort(key=lambda item: item[0])
         merged: list[list[float]] = []
         for start, end, ux, uy in spans:
@@ -189,7 +191,7 @@ def merge_collinear(segments: list[Segment], angle_tol: float = 1e-5, gap_tol: f
             nx, ny = uy, -ux
             p1 = (ux * start + nx * intercept, uy * start + ny * intercept)
             p2 = (ux * end + nx * intercept, uy * end + ny * intercept)
-            output.append(Segment(p1, p2, layer, role))
+            output.append(Segment(p1, p2, layer, role, fidelity))
     return output
 
 
@@ -277,6 +279,36 @@ def simplify_dense_furniture_segments(
     output = sorted(set(output), key=lambda item: (item.layer, item.role, item.start, item.end))
     changed = detail_changed or len(output) < len(segments)
     return output, changed
+
+
+def optimize_block_segments(
+    segments: list[Segment],
+    max_lines: int,
+    *,
+    plant: bool,
+    optimization_class: str,
+) -> tuple[list[Segment], bool]:
+    """Apply detail limits only to blocks classified as dense by SketchUp.
+
+    Full-fidelity blocks are already below the recursive complexity threshold.
+    Their merged linework is intentional drafting geometry and must not be
+    sampled merely because a global dense-block cap is lower.
+    """
+    if optimization_class == "full":
+        return segments, False
+    protected = [segment for segment in segments if segment.fidelity == "full"]
+    candidates = [segment for segment in segments if segment.fidelity != "full"]
+    if plant:
+        reduced, changed = simplify_dense_segments(candidates, max_lines)
+    else:
+        reduced, changed = simplify_dense_furniture_segments(candidates, max_lines)
+    if not protected:
+        return reduced, changed
+    output = sorted(
+        set(protected + reduced),
+        key=lambda item: (item.layer, item.role, item.fidelity, item.start, item.end),
+    )
+    return output, changed or len(output) < len(segments)
 
 
 def fit_circle(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
@@ -1019,10 +1051,11 @@ def build(
         ]
         merged_block_segments = merge_collinear(block_segments)
         block_lines_before += len(merged_block_segments)
-        output_block_segments, simplified = (
-            simplify_dense_segments(merged_block_segments, max_block_lines)
-            if plant_block
-            else simplify_dense_furniture_segments(merged_block_segments, max_block_lines)
+        output_block_segments, simplified = optimize_block_segments(
+            merged_block_segments,
+            max_block_lines,
+            plant=plant_block,
+            optimization_class=str(raw_block.get("optimizationClass", "dense")),
         )
         block_lines_after += len(output_block_segments)
         simplified_blocks += int(simplified)

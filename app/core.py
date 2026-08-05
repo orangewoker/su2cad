@@ -15,7 +15,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.5.6"
+APP_VERSION = "0.5.7"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -79,6 +79,9 @@ class ExportResult:
     opened_in_cad: bool
     warnings: tuple[str, ...] = ()
     elapsed_seconds: float = 0.0
+    full_fidelity_blocks: int = 0
+    optimized_dense_blocks: int = 0
+    occluded_blocks: int = 0
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -423,4 +426,10 @@ def export_current_view(
         opened_in_cad=opened,
         warnings=tuple(warnings),
         elapsed_seconds=round(time.perf_counter() - started_at, 2),
+        full_fidelity_blocks=(
+            int(extraction_result.get("fullFidelityBlocks") or 0)
+            + int(extraction_result.get("fullFidelityChildren") or 0)
+        ),
+        optimized_dense_blocks=int(extraction_result.get("optimizedDenseBlocks") or 0),
+        occluded_blocks=int(extraction_result.get("occludedBlocks") or 0),
     )
