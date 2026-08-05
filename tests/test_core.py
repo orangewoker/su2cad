@@ -15,7 +15,15 @@ sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import core  # noqa: E402
-from build_dxf import clean_dxf_text, clean_layer, select_paper_and_scale  # noqa: E402
+import ezdxf  # noqa: E402
+from build_dxf import (  # noqa: E402
+    FRAME_TEXT_FONT,
+    FRAME_TEXT_STYLE,
+    add_paper_layout,
+    clean_dxf_text,
+    clean_layer,
+    select_paper_and_scale,
+)
 
 
 class CoreTests(unittest.TestCase):
@@ -46,6 +54,21 @@ class CoreTests(unittest.TestCase):
     def test_dxf_names_preserve_chinese_but_remove_emoji(self) -> None:
         self.assertEqual(clean_dxf_text("夏至🌿材质"), "夏至_材质")
         self.assertEqual(clean_layer("MATERIAL_夏至🌿"), "SU-MATERIAL_夏至_")
+
+    def test_paper_layout_has_one_inner_frame_and_windows_heiti_text(self) -> None:
+        doc = ezdxf.new("R2018", setup=True)
+        config = select_paper_and_scale(20_000.0, 10_000.0, "A3", True)
+        layout_name = add_paper_layout(
+            doc,
+            (0.0, 0.0, 20_000.0, 10_000.0),
+            config,
+            "联洋项目",
+        )
+        paper = doc.layouts.get(layout_name)
+        frames = list(paper.query("LWPOLYLINE[layer=='SUCAD-FRAME']"))
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(doc.styles.get(FRAME_TEXT_STYLE).dxf.font, FRAME_TEXT_FONT)
+        self.assertTrue(all(text.dxf.style == FRAME_TEXT_STYLE for text in paper.query("TEXT")))
 
     def test_bridge_installation_is_detectable(self) -> None:
         self.assertTrue(core.find_bridge_main().is_file())

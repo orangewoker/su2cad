@@ -95,7 +95,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 
 `dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。它直接连接本机 SketchUp Bridge，并在窗口中完成参数设置、进度显示、DXF 生成和 CAD 打开。SketchUp 端仍需安装并启动本地 Bridge 插件。
 
-下载 GitHub Release 中的 `SU2CAD-0.5.1-windows-x64.zip`，完整解压后运行：
+下载 GitHub Release 中的 `SU2CAD-0.5.2-windows-x64.zip`，完整解压后运行：
 
 ```text
 SU2CAD\SU2CAD.exe
@@ -181,7 +181,8 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - 高度大于宽度时生成竖版布局，例如 `A4-P`。
 - `AUTO` 会结合图形尺寸和常用建筑比例，在 A4 至 A0 中选择最小可容纳图形与尺寸标注的图幅。
 - 固定 A0-A4 图幅时自动选择该图幅可容纳的最小标准比例，避免图形缩在图框中央。
-- 图框包含外边界、装订边、内边框、贯通式底部标题栏、项目名、比例、图幅方向与毫米单位。
+- 图框只保留装订边内框和贯通式底部标题栏，不再重复绘制纸张最外边界。
+- 图框项目名、比例和图幅文字统一使用 Windows 黑体 `simhei.ttf`，避免中文显示成问号。
 - DXF 只保留 `Model` 和正式纸空间布局，不保留空白 `Layout1`。
 
 ## 轻量化策略

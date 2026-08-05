@@ -40,6 +40,8 @@ PAPER_SIZES = {
 INVALID_LAYER_CHARS = re.compile(r"[<>/\\\":;?*|=`,]")
 DEFAULT_MAX_BLOCK_LINES = 2500
 PLANT_BLOCK_LAYER = "SU-PLANTS-BLOCKS"
+FRAME_TEXT_STYLE = "SUCAD-WINDOWS-HEITI"
+FRAME_TEXT_FONT = "simhei.ttf"
 DEPTH_TOLERANCE_MM = 0.5
 HATCH_SIMPLIFY_MM = 0.2
 PLANT_HATCH_SIMPLIFY_MM = 2.0
@@ -870,8 +872,8 @@ def add_paper_layout(doc, view_bounds: tuple[float, float, float, float], paper_
     inner_left, inner_bottom = 20.0, 10.0
     inner_right, inner_top = width - 10.0, height - 10.0
     title_top = inner_bottom + 25.0
-    paper.add_lwpolyline([(0, 0), (width, 0), (width, height), (0, height)], close=True,
-                         dxfattribs={"layer": "SUCAD-FRAME"})
+    if FRAME_TEXT_STYLE not in doc.styles:
+        doc.styles.add(FRAME_TEXT_STYLE, font=FRAME_TEXT_FONT)
     paper.add_lwpolyline(
         [(inner_left, inner_bottom), (inner_right, inner_bottom), (inner_right, inner_top), (inner_left, inner_top)],
         close=True,
@@ -884,14 +886,20 @@ def add_paper_layout(doc, view_bounds: tuple[float, float, float, float], paper_
     paper.add_line((paper_cell, inner_bottom), (paper_cell, title_top), dxfattribs={"layer": "SUCAD-FRAME"})
     paper.add_text(
         clean_dxf_text(title, "SketchUp Current View"),
-        dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME"},
+        dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME", "style": FRAME_TEXT_STYLE},
     ).set_placement(
         (inner_left + 4.0, inner_bottom + 13.0), align=TextEntityAlignment.MIDDLE_LEFT
     )
-    paper.add_text(f"1:{scale}", dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME"}).set_placement(
+    paper.add_text(
+        f"1:{scale}",
+        dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME", "style": FRAME_TEXT_STYLE},
+    ).set_placement(
         (scale_cell + 4.0, inner_bottom + 13.0), align=TextEntityAlignment.MIDDLE_LEFT
     )
-    paper.add_text(f"{name}-{'L' if orientation == 'Landscape' else 'P'} | mm", dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME"}).set_placement(
+    paper.add_text(
+        f"{name}-{'L' if orientation == 'Landscape' else 'P'} | mm",
+        dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME", "style": FRAME_TEXT_STYLE},
+    ).set_placement(
         (paper_cell + 4.0, inner_bottom + 13.0), align=TextEntityAlignment.MIDDLE_LEFT
     )
 

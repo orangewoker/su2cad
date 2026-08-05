@@ -58,7 +58,8 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Determine orientation from projected geometry: wider drawings use landscape and taller drawings use portrait.
 - In automatic mode, choose the smallest fitting standard A-series sheet from A4 through A0 at a practical architectural scale derived from the drawing size.
 - Use standard A-series dimensions: A4, A3, A2, A1, or A0. Allow a requested paper size to override automatic selection while preserving automatic orientation, then choose the smallest standard scale that fits that fixed sheet.
-- Create a paper-space layout named `<paper>-L` or `<paper>-P` with an outer edge, binding-margin inner border, full-width bottom title strip, drawing title, scale, sheet/orientation label, and viewport.
+- Create a paper-space layout named `<paper>-L` or `<paper>-P` with one binding-margin inner border, a full-width bottom title strip, drawing title, scale, sheet/orientation label, and viewport. Do not draw a duplicate paper-edge frame.
+- Use the Windows SimHei TrueType font (`simhei.ttf`) for all paper-frame text so Chinese titles render correctly in AutoCAD.
 - Keep the viewport above the title strip and include overall dimensions inside the printable area.
 - Keep source SketchUp tags on sanitized `SU-*` CAD layers.
 - Treat the generated DXF as a new artifact. Never overwrite the source `.skp` or an existing `.dwg`.
