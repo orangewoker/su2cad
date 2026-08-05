@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import core  # noqa: E402
-from build_dxf import select_paper_and_scale  # noqa: E402
+from build_dxf import clean_dxf_text, clean_layer, select_paper_and_scale  # noqa: E402
 
 
 class CoreTests(unittest.TestCase):
@@ -42,6 +42,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["orientation"], "Portrait")
         self.assertEqual(result["name"], "A3")
         self.assertEqual(result["scale"], 200)
+
+    def test_dxf_names_preserve_chinese_but_remove_emoji(self) -> None:
+        self.assertEqual(clean_dxf_text("夏至🌿材质"), "夏至_材质")
+        self.assertEqual(clean_layer("MATERIAL_夏至🌿"), "SU-MATERIAL_夏至_")
 
     def test_bridge_installation_is_detectable(self) -> None:
         self.assertTrue(core.find_bridge_main().is_file())

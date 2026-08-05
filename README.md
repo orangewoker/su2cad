@@ -95,7 +95,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 
 `dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。它直接连接本机 SketchUp Bridge，并在窗口中完成参数设置、进度显示、DXF 生成和 CAD 打开。SketchUp 端仍需安装并启动本地 Bridge 插件。
 
-下载 GitHub Release 中的 `SU2CAD-0.5.0-windows-x64.zip`，完整解压后运行：
+下载 GitHub Release 中的 `SU2CAD-0.5.1-windows-x64.zip`，完整解压后运行：
 
 ```text
 SU2CAD\SU2CAD.exe
@@ -119,6 +119,7 @@ SU2CAD\SU2CAD.exe
 - 导出期间暂停 Bridge 状态轮询，进度与日志更新采用节流，避免界面卡顿
 - Bridge HTTP 500 会显示真实 Ruby 错误和调用栈，并在输出目录保存失败报告
 - 单个射线异常会自动重试并保守保留对应几何；只有连续异常超过限额才终止任务
+- 自动清理材质名和图层名中的 emoji 等 AutoCAD DXF 不支持字符，避免 ezdxf 审计通过但 AutoCAD 拒绝打开
 - 材质构建失败时自动降级生成完整纯线稿 DXF
 - `%APPDATA%\SU2CAD\settings.json` 设置持久化
 

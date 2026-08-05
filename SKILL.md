@@ -44,6 +44,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Reuse one block definition for repeated top-plan instances and restore each instance with CAD INSERT rotation, mirroring, and scaling; create separate definitions for incompatible projected views.
 - Prefer complete block geometry for retained SketchUp components instead of dropping the whole object because a bounding-box visibility sample is occluded.
 - Place block references on sanitized `SU-BLOCK_*` layers derived from SketchUp component or group names.
+- Preserve BMP Chinese names but replace supplementary-plane Unicode such as emoji in all DXF symbol names and title text because AutoCAD rejects those characters even when ezdxf audit passes.
 - Limit only vegetation and other dense mesh-derived block linework to spatially distributed representative lines; preserve complete hard linework for furniture and ordinary components.
 - Place vegetation blocks on `SU-PLANTS-BLOCKS` so they can be frozen or hidden as a unit.
 - Export visible SketchUp face materials as RGB solid CAD hatches while using unpainted foreground faces as non-printing occlusion masks.

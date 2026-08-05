@@ -86,8 +86,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def clean_dxf_text(value: str, fallback: str = "") -> str:
+    # AutoCAD 2025 rejects supplementary-plane Unicode (notably emoji) in an
+    # ASCII DXF symbol name even though ezdxf can read and audit the file.
+    # Preserve BMP Chinese text while replacing unsupported/control characters.
+    cleaned = "".join(
+        character if 32 <= ord(character) <= 0xFFFF else "_"
+        for character in str(value or fallback)
+    )
+    return cleaned or fallback
+
+
 def clean_layer(value: str) -> str:
-    name = INVALID_LAYER_CHARS.sub("_", str(value or "Untagged")).strip()
+    name = INVALID_LAYER_CHARS.sub(
+        "_", clean_dxf_text(value, "Untagged")
+    ).strip()
     name = re.sub(r"\s+", "_", name)
     return ("SU-" + name)[:200] if name else "SU-Untagged"
 
@@ -869,7 +882,10 @@ def add_paper_layout(doc, view_bounds: tuple[float, float, float, float], paper_
     paper_cell = max(scale_cell + 35.0, inner_right - 40.0)
     paper.add_line((scale_cell, inner_bottom), (scale_cell, title_top), dxfattribs={"layer": "SUCAD-FRAME"})
     paper.add_line((paper_cell, inner_bottom), (paper_cell, title_top), dxfattribs={"layer": "SUCAD-FRAME"})
-    paper.add_text(title or "SketchUp Current View", dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME"}).set_placement(
+    paper.add_text(
+        clean_dxf_text(title, "SketchUp Current View"),
+        dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME"},
+    ).set_placement(
         (inner_left + 4.0, inner_bottom + 13.0), align=TextEntityAlignment.MIDDLE_LEFT
     )
     paper.add_text(f"1:{scale}", dxfattribs={"height": 3.5, "layer": "SUCAD-FRAME"}).set_placement(
