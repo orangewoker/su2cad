@@ -261,11 +261,13 @@ module SketchupCurrentViewCad
 
     def walk_entities(entities, transform, outer_tag, outer_material, context)
       source_count = entities.respond_to?(:length) ? entities.length.to_i : 0
-      selected_entities = context[:light_sampling] ? light_sampled_entities(entities, context) : entities
+      selected_entities = context[:light_sampling] ? light_sampled_entities(entities, transform, context) : entities
       selected_count = selected_entities.respond_to?(:length) ? selected_entities.length.to_i : source_count
+      light_plan = context[:light_entity_budget] ? light_child_budget_plan(selected_entities, transform, context) : nil
       selected_entities.each_with_index do |entity, index|
         budget = context[:light_entity_budget]
-        if budget
+        is_instance = entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+        if budget && !is_instance
           if budget[:remaining] <= 0
             context[:light_budget_exhausted] = true
             context[:skipped_sampled] += [selected_count - index, 0].max
@@ -292,9 +294,20 @@ module SketchupCurrentViewCad
                            emit_instance_block(entity, world_transform, child_tag, child_material, context)
                          else
                            :fallback
-                         end
+          end
           if block_result == :fallback
-            walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
+            if budget && light_plan
+              walk_light_child_entities(
+                entity,
+                world_transform,
+                child_tag,
+                child_material,
+                context,
+                light_plan
+              )
+            else
+              walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
+            end
           end
         when Sketchup::Edge
           emit_edge(entity, entities, transform, outer_tag, context)
@@ -305,12 +318,80 @@ module SketchupCurrentViewCad
       end
     end
 
+    # A dense imported component often stores tiny wheels, screws, tufting or
+    # decorative meshes before its actual body. A single shared depth-first
+    # budget therefore used to stop before the large seat/cabinet/table body.
+    # Allocate each child its own projected-area-weighted share and reserve part
+    # of the collection budget for direct faces/edges.
+    def light_child_budget_plan(entities, transform, context)
+      children = entities.select do |entity|
+        entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+      end
+      return nil if children.empty?
+
+      budget = context[:light_entity_budget]
+      primitive_count = entities.length - children.length
+      primitive_reserve = if primitive_count.positive?
+                            [(budget[:remaining] * 0.2).round, primitive_count, 256].max
+                          else
+                            0
+                          end
+      primitive_reserve = [primitive_reserve, budget[:remaining] / 2].min
+      weights = children.each_with_object({}) do |entity, output|
+        output[entity.object_id] = light_child_weight(entity, transform, context)
+      end
+      {
+        remaining_weight: weights.values.sum,
+        weights: weights,
+        remaining_children: children.length,
+        primitive_reserve: primitive_reserve
+      }
+    end
+
+    def walk_light_child_entities(entity, world_transform, child_tag, child_material, context, plan)
+      shared_budget = context[:light_entity_budget]
+      weight = plan[:weights][entity.object_id] || 1.0
+      available = [shared_budget[:remaining] - plan[:primitive_reserve], 0].max
+      remaining_weight = [plan[:remaining_weight], weight].max
+      proportional = (available * weight / remaining_weight).round
+      minimum = [256, available].min
+      quota = [[proportional, minimum].max, available].min
+
+      plan[:remaining_weight] -= weight
+      plan[:remaining_children] -= 1
+      if quota <= 0
+        context[:light_budget_exhausted] = true
+        context[:skipped_sampled] += entity.definition.entities.length.to_i
+        return
+      end
+
+      child_budget = { remaining: quota }
+      context[:light_entity_budget] = child_budget
+      walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
+      used = quota - child_budget[:remaining]
+      shared_budget[:remaining] -= used
+    ensure
+      context[:light_entity_budget] = shared_budget if shared_budget
+    end
+
+    def light_child_weight(entity, transform, context)
+      child_transform = transform * entity.transformation
+      width, height = projected_definition_size(entity.definition, child_transform, context[:basis])
+      area = [width.abs * height.abs, 1.0].max
+      # Square root keeps large bodies ahead without starving smaller meaningful
+      # children. Entity count contributes only mildly, preventing a tiny wheel
+      # mesh from outranking a full furniture body.
+      Math.sqrt(area) * Math.log2([entity.definition.entities.length.to_i, 2].max)
+    rescue StandardError
+      1.0
+    end
+
     # SketchUp models with dense vegetation can contain the same definition
     # millions of times. Build the light-mode representative list once per
     # Entities collection, then reuse it for every rotated/transformed instance.
     # This avoids repeatedly walking the complete Ruby collection merely to skip
     # most of it.
-    def light_sampled_entities(entities, context)
+    def light_sampled_entities(entities, transform, context)
       cache = context[:light_entity_collections] ||= {}
       key = entities.object_id
       cached = cache[key]
@@ -327,6 +408,16 @@ module SketchupCurrentViewCad
         end
         context[:skipped_sampled] += [count - selected.length, 0].max
       end
+      # Process large child definitions before small decorative meshes. Preserve
+      # source order for primitive geometry and for equal-size children.
+      indexed = selected.each_with_index.to_a
+      selected = indexed.sort_by do |entity, index|
+        if entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+          [-light_child_weight(entity, transform, context), index]
+        else
+          [0.0, index]
+        end
+      end.map(&:first)
       cache[key] = selected
     end
 
@@ -393,6 +484,9 @@ module SketchupCurrentViewCad
         viewport: context[:viewport],
         section: context[:section],
         ray_distance: context[:ray_distance],
+        # Full per-edge ray tests are still intentionally avoided in Light mode;
+        # local face-facing and micro-mesh cleanup removes hidden/internal detail
+        # without turning a two-minute export into an hours-long operation.
         occlusion: light_mode ? false : context[:occlusion],
         visibility_cache: context[:visibility_cache],
         depth_cache: context[:depth_cache],
@@ -414,6 +508,7 @@ module SketchupCurrentViewCad
         mm_per_pixel: context[:mm_per_pixel],
         cooperative: context[:cooperative],
         light_sampling: dense_sampling,
+        light_mesh_cleanup: dense_sampling,
         light_entity_budget: dense_sampling ? { remaining: LIGHT_BLOCK_ENTITY_BUDGET } : nil,
         light_budget_exhausted: false,
         skipped_hidden: 0,
@@ -721,12 +816,12 @@ module SketchupCurrentViewCad
         curve_edges = curve.respond_to?(:edges) ? curve.edges : [edge]
         context[:processed_curves][key] = true
         visible_curve_edges = curve_edges.select do |item|
-          entity_visible?(item) && display_edge?(item, transform, context)
+          entity_visible?(item) && curve_edge_display?(item, transform, context)
         end
         return if visible_curve_edges.empty?
 
         if visible_curve_edges.length != curve_edges.length
-          visible_curve_edges.each { |item| emit_straight_edge(item, transform, tag, context) }
+          visible_curve_edges.each { |item| emit_straight_edge(item, transform, tag, context, 'curve') }
           return
         end
 
@@ -737,12 +832,14 @@ module SketchupCurrentViewCad
         runs = clip_polyline_to_section(points, context[:section])
         runs.each { |run| emit_curve(run, closed && runs.length == 1, tag, context, curve_type) }
       else
-        return unless display_edge?(edge, transform, context)
-        emit_straight_edge(edge, transform, tag, context)
+        role = edge_export_role(edge, transform, context)
+        return unless role
+
+        emit_straight_edge(edge, transform, tag, context, role)
       end
     end
 
-    def emit_straight_edge(edge, transform, tag, context)
+    def emit_straight_edge(edge, transform, tag, context, edge_role = 'hard')
       start_point = edge.start.position.transform(transform)
       end_point = edge.end.position.transform(transform)
       section_pair = clip_segment_to_section(start_point, end_point, context[:section])
@@ -766,11 +863,15 @@ module SketchupCurrentViewCad
         next unless clipped
         next if distance2(clipped[0], clipped[1]) < 0.01
 
-        context[:lines] << { start: clipped[0], end: clipped[1], layer: tag }
+        context[:lines] << { start: clipped[0], end: clipped[1], layer: tag, edgeRole: edge_role }
       end
     end
 
     def display_edge?(edge, transform, context)
+      !edge_export_role(edge, transform, context).nil?
+    end
+
+    def curve_edge_display?(edge, transform, context)
       faces = edge.faces.to_a
       return true if faces.length < 2
 
@@ -780,12 +881,51 @@ module SketchupCurrentViewCad
       context[:silhouette_edges] += 1 if silhouette
       return silhouette if edge.soft? || edge.smooth?
 
-      # A regular SketchUp edge is intentional drafting geometry. Do not remove
-      # shallow/coplanar hard edges merely because adjacent faces share material;
-      # that rule erased furniture seams and short construction details.
       true
     rescue StandardError
       false
+    end
+
+    def edge_export_role(edge, transform, context)
+      faces = edge.faces.to_a
+      return 'boundary' if faces.length < 2
+
+      normals = faces.map { |face| world_face_normal(face, transform) }
+      dots = normals.map { |normal| normal.dot(context[:basis][:forward]) }
+      silhouette = dots.min < -1.0e-5 && dots.max > 1.0e-5
+      context[:silhouette_edges] += 1 if silhouette
+      return 'silhouette' if silhouette
+      return nil if edge.soft? || edge.smooth?
+
+      if context[:light_mesh_cleanup]
+        # Back-facing faces and sub-pixel hard facets are not visible furniture
+        # drafting information. Keep boundaries, silhouettes, curves and long
+        # structural seams, but remove the dense imported mesh that otherwise
+        # appears as random interior scratches in CAD.
+        return nil if dots.all? { |dot| dot > 1.0e-4 }
+
+        start_point = edge.start.position.transform(transform)
+        end_point = edge.end.position.transform(transform)
+        projected_start = project(start_point, context[:basis])
+        projected_end = project(end_point, context[:basis])
+        projected_length = Math.sqrt(distance2(projected_start, projected_end))
+        micro_threshold = [context[:mm_per_pixel].to_f * 0.75, 2.0].max
+        same_material = faces.map { |face| face_material_key(face, normal_facing_dot(face, transform, context)) }.uniq.length <= 1
+        coplanar = normals.combination(2).all? { |a, b| a.dot(b).abs > 0.9999 }
+        return nil if projected_length < micro_threshold
+        return nil if coplanar && same_material && projected_length < micro_threshold * 4.0
+      end
+
+      # A regular SketchUp edge is intentional drafting geometry. Do not remove
+      # shallow/coplanar hard edges merely because adjacent faces share material;
+      # that rule erased furniture seams and short construction details.
+      'hard'
+    rescue StandardError
+      nil
+    end
+
+    def normal_facing_dot(face, transform, context)
+      world_face_normal(face, transform).dot(context[:basis][:forward])
     end
 
     def face_material_key(face, facing_dot)
@@ -931,7 +1071,13 @@ module SketchupCurrentViewCad
           clipped = clip_projected_segment(a, b, context[:viewport])
           next unless clipped
 
-          context[:lines] << { start: clipped[0], end: clipped[1], layer: 'SUCAD-SECTION', section: true }
+          context[:lines] << {
+            start: clipped[0],
+            end: clipped[1],
+            layer: 'SUCAD-SECTION',
+            section: true,
+            edgeRole: 'section'
+          }
           context[:section_lines] += 1
         end
       end

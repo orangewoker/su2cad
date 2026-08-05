@@ -59,6 +59,7 @@ class Segment:
     start: tuple[float, float]
     end: tuple[float, float]
     layer: str
+    role: str = "hard"
 
 
 @dataclass(frozen=True)
@@ -148,11 +149,16 @@ def normalize_segment(raw: dict) -> Segment | None:
     end = point2(raw["end"])
     if math.dist(start, end) < 0.01:
         return None
-    return Segment(start, end, clean_layer(raw.get("layer", "Untagged")))
+    return Segment(
+        start,
+        end,
+        clean_layer(raw.get("layer", "Untagged")),
+        str(raw.get("edgeRole") or "hard"),
+    )
 
 
 def merge_collinear(segments: list[Segment], angle_tol: float = 1e-5, gap_tol: float = 0.2) -> list[Segment]:
-    groups: dict[tuple[str, int, int], list[tuple[float, float, float, float]]] = {}
+    groups: dict[tuple[str, str, int, int], list[tuple[float, float, float, float]]] = {}
     for segment in segments:
         x1, y1 = segment.start
         x2, y2 = segment.end
@@ -165,12 +171,12 @@ def merge_collinear(segments: list[Segment], angle_tol: float = 1e-5, gap_tol: f
             ux, uy = -ux, -uy
         angle_key = round(math.atan2(uy, ux) / angle_tol)
         intercept = x1 * uy - y1 * ux
-        key = (segment.layer, angle_key, round(intercept / 0.05))
+        key = (segment.layer, segment.role, angle_key, round(intercept / 0.05))
         t1, t2 = x1 * ux + y1 * uy, x2 * ux + y2 * uy
         groups.setdefault(key, []).append((min(t1, t2), max(t1, t2), ux, uy))
 
     output: list[Segment] = []
-    for (layer, _angle, intercept_key), spans in groups.items():
+    for (layer, role, _angle, intercept_key), spans in groups.items():
         spans.sort(key=lambda item: item[0])
         merged: list[list[float]] = []
         for start, end, ux, uy in spans:
@@ -183,7 +189,7 @@ def merge_collinear(segments: list[Segment], angle_tol: float = 1e-5, gap_tol: f
             nx, ny = uy, -ux
             p1 = (ux * start + nx * intercept, uy * start + ny * intercept)
             p2 = (ux * end + nx * intercept, uy * end + ny * intercept)
-            output.append(Segment(p1, p2, layer))
+            output.append(Segment(p1, p2, layer, role))
     return output
 
 
@@ -231,6 +237,46 @@ def simplify_dense_segments(segments: list[Segment], max_lines: int) -> tuple[li
             if len(selected) >= max_lines:
                 break
     return sorted(selected, key=lambda item: (item.layer, item.start, item.end)), True
+
+
+def simplify_dense_furniture_segments(
+    segments: list[Segment],
+    max_lines: int,
+) -> tuple[list[Segment], bool]:
+    """Remove imported mesh scratches while preserving real furniture outlines.
+
+    Ruby labels source boundaries and silhouettes before the geometry is
+    normalized. Those lines are always kept. Only dense hard-edge detail is
+    length-filtered and spatially sampled, which avoids the old failure mode
+    where a blind line cap erased half of a chair or sofa.
+    """
+    if max_lines <= 0 or len(segments) <= max(max_lines * 2, 1600):
+        return segments, False
+
+    xs = [point[0] for segment in segments for point in (segment.start, segment.end)]
+    ys = [point[1] for segment in segments for point in (segment.start, segment.end)]
+    diagonal = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    micro_threshold = max(2.0, diagonal / 300.0)
+    protected_roles = {"boundary", "silhouette", "curve", "section"}
+    protected = [segment for segment in segments if segment.role in protected_roles]
+    detail = [
+        segment
+        for segment in segments
+        if segment.role not in protected_roles and segment_length(segment) >= micro_threshold
+    ]
+
+    # Light mode asks for 800 plant lines, but ordinary furniture needs a larger
+    # structural allowance. The guaranteed outline is not charged to that cap.
+    structural_target = max(max_lines * 2, 1600)
+    detail_budget = max(structural_target - len(protected), 0)
+    if detail_budget <= 0:
+        reduced_detail, detail_changed = [], bool(detail)
+    else:
+        reduced_detail, detail_changed = simplify_dense_segments(detail, detail_budget)
+    output = protected + reduced_detail
+    output = sorted(set(output), key=lambda item: (item.layer, item.role, item.start, item.end))
+    changed = detail_changed or len(output) < len(segments)
+    return output, changed
 
 
 def fit_circle(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
@@ -976,7 +1022,7 @@ def build(
         output_block_segments, simplified = (
             simplify_dense_segments(merged_block_segments, max_block_lines)
             if plant_block
-            else (merged_block_segments, False)
+            else simplify_dense_furniture_segments(merged_block_segments, max_block_lines)
         )
         block_lines_after += len(output_block_segments)
         simplified_blocks += int(simplified)

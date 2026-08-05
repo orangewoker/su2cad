@@ -35,6 +35,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Sample line visibility in screen space according to the selected quality profile, cap samples per segment, and reuse nearest-hit depth by screen tile.
 - In the desktop app, run SketchUp extraction as short resumable steps so progress and cancellation remain responsive and one long HTTP request cannot time out the whole scene.
 - In Light quality, never expand millions of repeated component entities. Cache bounded real geometry per definition and reuse it through CAD INSERT rotation, mirroring, and scaling; do not invent bounding-polygon proxy blocks.
+- In Light quality, distribute a block's traversal budget across child instances by projected footprint. Always reserve enough geometry for large furniture bodies before spending detail on tiny high-poly wheels, screws, tufting, and decorations.
 - Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
@@ -45,7 +46,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Prefer complete block geometry for retained SketchUp components instead of dropping the whole object because a bounding-box visibility sample is occluded.
 - Place block references on sanitized `SU-BLOCK_*` layers derived from SketchUp component or group names.
 - Preserve BMP Chinese names but replace supplementary-plane Unicode such as emoji in all DXF symbol names and title text because AutoCAD rejects those characters even when ezdxf audit passes.
-- Limit only vegetation and other dense mesh-derived block linework to spatially distributed representative lines; preserve complete hard linework for furniture and ordinary components.
+- Preserve boundary, silhouette, curve, and structural seam linework for furniture. In exceptionally dense imported furniture blocks, discard back-facing and sub-pixel mesh facets before applying a spatial detail budget; never use a blind line cap that can erase the object body.
 - Place vegetation blocks on `SU-PLANTS-BLOCKS` so they can be frozen or hidden as a unit.
 - Export visible SketchUp face materials as RGB solid CAD hatches while using unpainted foreground faces as non-printing occlusion masks.
 - Resolve projected material visibility with per-face depth planes so sloped and crossing surfaces are clipped at their actual depth boundary.
