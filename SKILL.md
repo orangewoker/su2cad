@@ -105,5 +105,6 @@ Require all of the following before declaring success:
 - The reported layout exists, uses the reported standard paper dimensions, and its orientation matches the projected geometry.
 - The paper-space frame, full-width title strip, scale text, and viewport exist.
 - AutoCAD title changes to the generated DXF when opening was requested.
+- Before opening a generated file, restore AutoCAD `FILEDIA` and `CMDDIA` to `1` through the running-object table without launching a second CAD instance.
 - Bridge failures preserve the Ruby error and backtrace; desktop failures write `SU2CAD_export_failure_*.log` in the selected output folder.
 - If desktop material construction fails, a valid audited linework-only DXF is still produced and the downgrade is reported.

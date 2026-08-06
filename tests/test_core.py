@@ -78,6 +78,15 @@ class CoreTests(unittest.TestCase):
         for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
             self.assertTrue((core.resource_root() / "assets" / f"su2cad-{size}.png").is_file())
 
+    def test_cad_dialog_repair_uses_running_instance_script(self) -> None:
+        completed = type("Completed", (), {"returncode": 0})()
+        with patch("core.shutil.which", return_value="pwsh.exe"):
+            with patch("core.subprocess.run", return_value=completed) as run:
+                self.assertTrue(core.repair_cad_dialogs())
+        command = run.call_args.args[0]
+        self.assertIn("repair_cad_dialogs.ps1", command[-1])
+        self.assertNotIn("acad.exe", " ".join(command).casefold())
+
     def test_http_500_preserves_bridge_error_details(self) -> None:
         payload = {
             "ok": False,

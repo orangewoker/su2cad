@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -15,7 +16,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -182,7 +183,37 @@ def cad_is_running() -> bool:
     return "acad.exe" in completed.stdout.casefold()
 
 
+def repair_cad_dialogs() -> bool:
+    """Restore AutoCAD's standard file/command dialogs without launching CAD."""
+    if os.name != "nt":
+        return False
+    script = SCRIPTS_DIR / "repair_cad_dialogs.ps1"
+    if not script.is_file():
+        return False
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        return False
+    try:
+        completed = subprocess.run(
+            [shell, "-NoProfile", "-File", str(script)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=CREATE_NO_WINDOW,
+            timeout=8,
+            check=False,
+        )
+        return completed.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def open_in_cad(path: Path) -> bool:
+    # Some AutoCAD/Tianzheng plug-ins leave FILEDIA at 0 after scripted work,
+    # which makes Ctrl+O look frozen because it waits at the command line.
+    # Repair the already-running instance before asking Autodesk to open DXF.
+    repair_cad_dialogs()
     launcher = Path(r"C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe")
     acad = Path(r"C:\Program Files\Autodesk\AutoCAD 2025\acad.exe")
     if launcher.exists():

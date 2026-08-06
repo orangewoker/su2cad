@@ -87,6 +87,10 @@ Move-Item -LiteralPath $dxfPath -Destination $finalDxfPath
 $dxfPath = $finalDxfPath
 
 if (-not $NoOpen) {
+    $dialogRepair = Join-Path $PSScriptRoot 'repair_cad_dialogs.ps1'
+    if (Test-Path -LiteralPath $dialogRepair) {
+        & $dialogRepair | Out-Null
+    }
     $autodeskLauncher = 'C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe'
     $acadPath = 'C:\Program Files\Autodesk\AutoCAD 2025\acad.exe'
     if (Test-Path -LiteralPath $autodeskLauncher) {

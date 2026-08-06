@@ -19,6 +19,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(root / "scripts" / "export_current_view.rb"), "scripts"),
+        (str(root / "scripts" / "repair_cad_dialogs.ps1"), "scripts"),
         (str(app_icon), "assets"),
         *((str(path), "assets") for path in app_icon_pngs),
         *customtkinter_data,
