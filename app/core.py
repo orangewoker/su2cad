@@ -16,7 +16,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.6.3"
+APP_VERSION = "0.7.0"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -342,7 +342,13 @@ def _extract_geometry_chunked(
                     estimated = min(58, 12 + int(46 * processed / (processed + 12_000)))
                     count_label = f"{processed:,}"
                 entity_label = "代表实体" if quality in {"light", "balanced"} else "实体"
-                progress(estimated, f"正在提取当前视图几何 · 已计算 {count_label} 个{entity_label}")
+                chunk_total = max(0, int(step.get("spatialChunks") or 0))
+                chunk_done = max(0, int(step.get("processedSpatialChunks") or 0))
+                chunk_label = f" · 视图区块 {chunk_done}/{chunk_total}" if chunk_total else ""
+                progress(
+                    estimated,
+                    f"正在分块提取当前视图几何{chunk_label} · 已计算 {count_label} 个{entity_label}",
+                )
                 last_reported = processed
             if step.get("done"):
                 result = step.get("result")

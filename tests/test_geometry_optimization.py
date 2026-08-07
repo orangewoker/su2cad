@@ -59,6 +59,23 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("dense_hard_deadline", source)
         self.assertIn("skippedTimeBudget", source)
 
+    def test_balanced_spatial_chunks_and_protected_simple_children(self) -> None:
+        source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
+        self.assertIn("BALANCED_SPATIAL_CHUNK_GRID = 4", source)
+        self.assertIn("dense = Hash.new", source)
+        self.assertIn("dense_order << item[2]", source)
+        self.assertIn("processedSpatialChunks", source)
+        self.assertIn("BALANCED_PROTECTED_CHILD_BUDGET = 8_000", source)
+        self.assertIn("compact_full_fidelity_child?", source)
+        self.assertNotIn("context[:omitted_time_budget] += 1\n        return :emitted", source)
+
+    def test_nested_sketchup_tags_override_only_untagged_parent_inheritance(self) -> None:
+        source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
+        self.assertIn("child_tag = effective_tag_name(entity, outer_tag)", source)
+        self.assertIn("tag_name(entity) || outer_tag", source)
+        self.assertIn("layers: export_layers(model)", source)
+        self.assertIn("layer: layer || tag_name(instance) || 'Untagged'", source)
+
     def test_dense_furniture_keeps_boundaries_and_removes_micro_mesh(self) -> None:
         boundaries = [
             Segment((0.0, 0.0), (1000.0, 0.0), "SU-FURNITURE", "boundary"),

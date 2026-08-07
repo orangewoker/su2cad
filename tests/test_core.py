@@ -23,6 +23,7 @@ from build_dxf import (  # noqa: E402
     clean_dxf_text,
     clean_layer,
     select_paper_and_scale,
+    source_layer_colors,
 )
 
 
@@ -54,6 +55,14 @@ class CoreTests(unittest.TestCase):
     def test_dxf_names_preserve_chinese_but_remove_emoji(self) -> None:
         self.assertEqual(clean_dxf_text("夏至🌿材质"), "夏至_材质")
         self.assertEqual(clean_layer("MATERIAL_夏至🌿"), "SU-MATERIAL_夏至_")
+
+    def test_sketchup_layer_colors_are_inherited(self) -> None:
+        self.assertEqual(
+            source_layer_colors(
+                {"layers": [{"name": "家具", "color": [23, 140, 81]}]}
+            ),
+            {"SU-家具": (23, 140, 81)},
+        )
 
     def test_paper_layout_has_one_inner_frame_and_windows_heiti_text(self) -> None:
         doc = ezdxf.new("R2018", setup=True)
@@ -116,8 +125,20 @@ class CoreTests(unittest.TestCase):
             )
             responses = [
                 {"ok": True, "sessionId": "session-1"},
-                {"ok": True, "done": False, "processedEntities": 1500},
-                {"ok": True, "done": True, "processedEntities": 3000},
+                {
+                    "ok": True,
+                    "done": False,
+                    "processedEntities": 1500,
+                    "processedSpatialChunks": 4,
+                    "spatialChunks": 12,
+                },
+                {
+                    "ok": True,
+                    "done": True,
+                    "processedEntities": 3000,
+                    "processedSpatialChunks": 12,
+                    "spatialChunks": 12,
+                },
             ]
             progress_events: list[tuple[int, str]] = []
             with patch("core._run_ruby_json", side_effect=responses) as run:
@@ -133,6 +154,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(run.call_count, 3)
             self.assertIn("quality: 'light'", run.call_args_list[0].args[0])
             self.assertIn("3,000 / 5,000", progress_events[-1][1])
+            self.assertIn("视图区块 12/12", progress_events[-1][1])
 
     def test_fast_workload_preflight_calls_ruby_census(self) -> None:
         expected = {

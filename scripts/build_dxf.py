@@ -109,6 +109,22 @@ def clean_layer(value: str) -> str:
     return ("SU-" + name)[:200] if name else "SU-Untagged"
 
 
+def source_layer_colors(payload: dict) -> dict[str, tuple[int, int, int]]:
+    colors: dict[str, tuple[int, int, int]] = {}
+    for raw in payload.get("layers", []):
+        if not isinstance(raw, dict):
+            continue
+        color = raw.get("color")
+        if not isinstance(color, (list, tuple)) or len(color) < 3:
+            continue
+        try:
+            rgb = tuple(max(0, min(255, int(value))) for value in color[:3])
+        except (TypeError, ValueError):
+            continue
+        colors[clean_layer(raw.get("name", "Untagged"))] = rgb
+    return colors
+
+
 def point2(value: Iterable[float]) -> tuple[float, float]:
     data = list(value)
     return float(data[0]), float(data[1])
@@ -1138,9 +1154,12 @@ def build(
         used_layers.update(clean_layer(raw.get("layer", "Untagged")) for raw in block.get("curves", []))
     used_layers.update(record.layer for record in fill_records if record.paint)
     used_layers.update(clean_layer(raw.get("layer", "Untagged")) for raw in payload.get("blockReferences", []))
+    inherited_colors = source_layer_colors(payload)
     for name in sorted(used_layers):
         if name not in doc.layers:
-            doc.layers.add(name, color=7, lineweight=18)
+            layer = doc.layers.add(name, color=7, lineweight=18)
+            if name in inherited_colors:
+                layer.rgb = inherited_colors[name]
 
     quality = str(payload.get("stats", {}).get("quality") or "precise").lower()
     extent_points, material_hatches, material_count, occluder_faces = add_material_hatches(

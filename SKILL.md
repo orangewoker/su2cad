@@ -39,13 +39,14 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - In Light quality, distribute a block's traversal budget across child instances by projected footprint. Always reserve enough geometry for large furniture bodies before spending detail on tiny high-poly wheels, screws, tufting, and decorations.
 - In Balanced quality, reuse fully visible planar block definitions and apply a 40,000-entity block budget plus a 24,000-entity collection sample limit. Reserve unbounded per-edge occlusion for Precise quality so repeated furniture does not expand into millions of duplicate operations.
 - Sample oversized SketchUp `Entities` collections with deterministic evenly spaced indexes rather than their first N members so geometry stored late in imported definitions is not erased.
-- In Balanced quality, order root geometry as primitives, complete simple blocks, planar outline/text blocks, then dense blocks from largest projected footprint to smallest.
+- In Balanced quality, order root geometry as primitives, complete simple blocks and planar outline/text blocks first. Partition remaining dense roots into a 4x4 screen-space grid and process the grid round-robin by projected footprint; append all chunk results into one payload while sharing the block cache.
 - Preserve planar lettering and logos up to a bounded 150,000 recursively expanded entities as complete outline geometry with mesh-seam cleanup.
-- Use 72/105/135-second Balanced extraction stages: normal dense detail, compact real-geometry outlines, then stop only the remaining smallest uncached dense objects. Never apply this deadline degradation to simple or protected outline blocks.
+- Use 72/105/135-second Balanced extraction stages: normal dense detail, compact real-geometry outlines, then a minimum bounded pass over every remaining uncached dense object. Never return an empty success merely because the final deadline was reached.
 - In a strict section view, use exact full-block edge clipping before the soft deadline. After it, keep fully visible simple blocks complete, discard fully covered blocks by the instance grid, and coarsely clip only partial blocks.
 - Reuse already generated block definitions even after a time threshold, including section views when an instance lies wholly on the kept side of the cut plane.
 - Before expanding a block, classify it by recursively bounded definition complexity. In Balanced quality, preserve blocks at or below 6,000 expanded entities without collection sampling, mesh cleanup, or a per-block entity budget.
 - Repeat that classification at every nested child. A dense wrapper must not spend or sample away a simple child; mark child linework as full fidelity and exempt it from downstream dense-block line caps.
+- In the compact deadline stage, keep a hard-bounded protected budget for cheap nested simple children so rails, shelves, signs, and ordinary line groups remain complete without making dense imported meshes unbounded.
 - Preserve a full-fidelity simple block intact when its projected multi-point visibility probe finds it visible. Discard a fully covered block before traversal, and apply edge-level clipping only to a genuinely partial block.
 - Classify full-fidelity simple blocks with fine screen-depth tiles. Never reuse a coarse dense-object visibility tile to discard an adjacent shelf, rail, frame, or other thin structural component.
 - Treat `MaxBlockLines` as a dense-block control. Never apply its line sampling to a block marked `optimizationClass: full`; ordinary groups, sign lettering, and other simple components must retain all merged linework.
@@ -58,7 +59,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Preserve suitable top-level SketchUp components and object-sized groups as CAD blocks.
 - Reuse one block definition for repeated top-plan instances and restore each instance with CAD INSERT rotation, mirroring, and scaling; create separate definitions for incompatible projected views.
 - Prefer complete block geometry for retained SketchUp components instead of dropping the whole object because a bounding-box visibility sample is occluded.
-- Place block references on sanitized `SU-BLOCK_*` layers derived from SketchUp component or group names.
+- Place block references on sanitized `SU-*` layers inherited from their effective SketchUp tags. A nested entity's explicit tag overrides its containing instance tag; Untagged geometry inherits the containing tag. Carry visible SketchUp tag RGB colors into the corresponding CAD layers.
 - Preserve BMP Chinese names but replace supplementary-plane Unicode such as emoji in all DXF symbol names and title text because AutoCAD rejects those characters even when ezdxf audit passes.
 - Preserve boundary, silhouette, curve, and structural seam linework for furniture. In exceptionally dense imported furniture blocks, discard back-facing and sub-pixel mesh facets before applying a spatial detail budget; never use a blind line cap that can erase the object body.
 - Place vegetation blocks on `SU-PLANTS-BLOCKS` so they can be frozen or hidden as a unit.

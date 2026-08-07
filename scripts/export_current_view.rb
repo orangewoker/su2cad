@@ -18,6 +18,12 @@ module SketchupCurrentViewCad
   BALANCED_ENTITY_SAMPLES_PER_COLLECTION = 24_000
   LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD = 1_000
   BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD = 6_000
+  LIGHT_COMPACT_CHILD_ENTITY_THRESHOLD = 400
+  BALANCED_COMPACT_CHILD_ENTITY_THRESHOLD = 1_500
+  LIGHT_PROTECTED_CHILD_BUDGET = 2_000
+  BALANCED_PROTECTED_CHILD_BUDGET = 8_000
+  LIGHT_SPATIAL_CHUNK_GRID = 3
+  BALANCED_SPATIAL_CHUNK_GRID = 4
   LIGHT_UNIQUE_COMPONENT_THRESHOLD = 100_000
   EXPORT_SESSIONS = {}
   QUALITY_PROFILES = {
@@ -153,6 +159,7 @@ module SketchupCurrentViewCad
           name: section[:name],
           planeMm: section[:plane].map.with_index { |value, index| index == 3 ? (value * MM_PER_INCH).round(4) : value.round(8) }
         },
+        layers: export_layers(model),
         lines: context[:lines],
         curves: context[:curves],
         fills: context[:fills],
@@ -179,6 +186,8 @@ module SketchupCurrentViewCad
           occludedBlocks: context[:occluded_blocks],
           skippedTimeBudget: context[:skipped_time_budget],
           omittedTimeBudget: context[:omitted_time_budget],
+          spatialChunks: context[:spatial_chunks].to_i,
+          processedSpatialChunks: (context[:spatial_chunks_touched] || {}).length,
           extractionSeconds: (monotonic_time - export_started).round(2),
           occlusion: effective_occlusion,
           requestedOcclusion: occlusion,
@@ -240,6 +249,8 @@ module SketchupCurrentViewCad
           ok: true,
           done: false,
           processedEntities: control[:processed_entities],
+          processedSpatialChunks: control[:processed_spatial_chunks].to_i,
+          spatialChunks: control[:spatial_chunks].to_i,
           checkpoint: yielded_or_result
         }
       else
@@ -248,6 +259,8 @@ module SketchupCurrentViewCad
           ok: true,
           done: true,
           processedEntities: control[:processed_entities],
+          processedSpatialChunks: control[:processed_spatial_chunks].to_i,
+          spatialChunks: control[:spatial_chunks].to_i,
           result: yielded_or_result
         }
       end
@@ -360,7 +373,11 @@ module SketchupCurrentViewCad
       deadline = control[:deadline]
       return unless deadline && monotonic_time >= deadline
 
-      Fiber.yield(processedEntities: control[:processed_entities])
+      Fiber.yield(
+        processedEntities: control[:processed_entities],
+        processedSpatialChunks: control[:processed_spatial_chunks].to_i,
+        spatialChunks: control[:spatial_chunks].to_i
+      )
     end
 
     def walk_entities(entities, transform, outer_tag, outer_material, context)
@@ -386,6 +403,18 @@ module SketchupCurrentViewCad
           budget[:remaining] -= 1
         end
         cooperative_checkpoint(context)
+        if context[:root_spatial_map]
+          chunk = context[:root_spatial_map][entity.object_id]
+          if chunk
+            touched = context[:spatial_chunks_touched] ||= {}
+            unless touched[chunk]
+              touched[chunk] = true
+              if context[:cooperative]
+                context[:cooperative][:processed_spatial_chunks] = touched.length
+              end
+            end
+          end
+        end
         unless entity_visible?(entity)
           context[:skipped_hidden] += 1
           next
@@ -393,7 +422,7 @@ module SketchupCurrentViewCad
 
         case entity
         when Sketchup::Group, Sketchup::ComponentInstance
-          child_tag = outer_tag || tag_name(entity)
+          child_tag = effective_tag_name(entity, outer_tag)
           child_material = entity.respond_to?(:material) && entity.material ? entity.material : outer_material
           world_transform = transform * entity.transformation
           unless instance_intersects_view?(entity, world_transform, context)
@@ -460,11 +489,10 @@ module SketchupCurrentViewCad
 
     def walk_light_child_entities(entity, world_transform, child_tag, child_material, context, plan)
       shared_budget = context[:light_entity_budget]
-      fidelity_mode = if context[:time_compact]
-                        nil
-                      elsif full_fidelity_block?(entity, context)
+      fidelity_mode = if full_fidelity_block?(entity, context) &&
+                         (!context[:time_compact] || compact_full_fidelity_child?(entity, context))
                         :full
-                      elsif outline_fidelity_block?(entity, world_transform, context)
+                      elsif !context[:time_compact] && outline_fidelity_block?(entity, world_transform, context)
                         :outline
                       end
       if fidelity_mode
@@ -513,6 +541,27 @@ module SketchupCurrentViewCad
       context[:occlusion] = previous_occlusion unless previous_occlusion.nil?
       context[:profile] = previous_profile unless previous_profile.nil?
       context[:light_entity_budget] = shared_budget if shared_budget
+    end
+
+    # Even after the global deadline, a cheap nested group is more valuable
+    # than another uniform sample of upholstery/vegetation mesh. Reserve a
+    # small, hard-bounded budget for these structural children so rails, signs,
+    # shelves and ordinary line groups remain complete without making a dense
+    # furniture definition unbounded again.
+    def compact_full_fidelity_child?(entity, context)
+      remaining = context[:protected_child_budget].to_i
+      return false if remaining <= 0
+
+      threshold = context[:quality] == 'balanced' ?
+                    BALANCED_COMPACT_CHILD_ENTITY_THRESHOLD :
+                    LIGHT_COMPACT_CHILD_ENTITY_THRESHOLD
+      complexity = definition_complexity(entity.definition, context, threshold)
+      return false if complexity > threshold || complexity > remaining
+
+      context[:protected_child_budget] = remaining - complexity
+      true
+    rescue StandardError
+      false
     end
 
     def light_child_weight(entity, transform, context)
@@ -565,28 +614,72 @@ module SketchupCurrentViewCad
       cache[key] = selected
     end
 
-    # The time budget is useful only when important objects are handled first.
-    # Preserve root primitives, then complete simple/planar-outline components,
-    # followed by dense components from the largest projected footprint to the
-    # smallest. This prevents late decorative meshes from consuming the budget
-    # before furniture bodies, signs and ordinary groups.
+    # Split the viewport into a small screen-space grid. Preserve root
+    # primitives and complete simple/planar objects first, then interleave dense
+    # objects from every cell. One difficult furniture/plant cluster can no
+    # longer consume the whole deadline before another region is visited. The
+    # cell results still append to one payload, so repeated definitions share
+    # the same block cache and are stitched into one editable DXF without seams.
     def prioritize_root_entities(entities, transform, context)
       indexed = entities.to_a.each_with_index.to_a
-      indexed.sort_by do |entity, index|
+      simple = []
+      dense = Hash.new { |hash, key| hash[key] = [] }
+      grid = context[:quality] == 'balanced' ? BALANCED_SPATIAL_CHUNK_GRID : LIGHT_SPATIAL_CHUNK_GRID
+      viewport = context[:viewport]
+      width = [viewport[:max_x] - viewport[:min_x], 1.0].max
+      height = [viewport[:max_y] - viewport[:min_y], 1.0].max
+      spatial_map = {}
+
+      indexed.each do |entity, index|
         unless entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
-          next [0, 0.0, index]
+          simple << [0, 0.0, index, entity]
+          next
         end
 
         world_transform = transform * entity.transformation
         full = full_fidelity_block?(entity, context)
         outline = !full && outline_fidelity_block?(entity, world_transform, context)
-        width, height = projected_definition_size(entity.definition, world_transform, context[:basis])
-        footprint = width.abs * height.abs
-        priority_class = full ? 1 : (outline ? 2 : 3)
-        [priority_class, -footprint, index]
+        projected = bounds_corners(entity.definition.bounds).map do |point|
+          project(point.transform(world_transform), context[:basis])
+        end
+        xs = projected.map { |point| point[0] }
+        ys = projected.map { |point| point[1] }
+        footprint = (xs.max - xs.min).abs * (ys.max - ys.min).abs
+        if full || outline
+          simple << [full ? 1 : 2, -footprint, index, entity]
+          next
+        end
+
+        center_x = (xs.min + xs.max) / 2.0
+        center_y = (ys.min + ys.max) / 2.0
+        column = (((center_x - viewport[:min_x]) / width) * grid).floor.clamp(0, grid - 1)
+        row = (((center_y - viewport[:min_y]) / height) * grid).floor.clamp(0, grid - 1)
+        chunk = row * grid + column
+        dense[chunk] << [-footprint, index, entity]
+        spatial_map[entity.object_id] = chunk
       rescue StandardError
-        [4, 0.0, index]
-      end.map(&:first)
+        simple << [4, 0.0, index, entity]
+      end
+
+      simple.sort_by! { |priority, footprint, index, _entity| [priority, footprint, index] }
+      dense.each_value { |items| items.sort_by! { |footprint, index, _entity| [footprint, index] } }
+      dense_order = []
+      chunk_ids = dense.keys.sort
+      until chunk_ids.empty?
+        chunk_ids = chunk_ids.select do |chunk|
+          item = dense[chunk].shift
+          dense_order << item[2] if item
+          !dense[chunk].empty?
+        end
+      end
+      context[:root_spatial_map] = spatial_map
+      context[:spatial_chunks] = dense.keys.length
+      context[:spatial_chunks_touched] = {}
+      if context[:cooperative]
+        context[:cooperative][:spatial_chunks] = dense.keys.length
+        context[:cooperative][:processed_spatial_chunks] = 0
+      end
+      simple.map(&:last) + dense_order
     rescue StandardError
       entities
     end
@@ -644,7 +737,7 @@ module SketchupCurrentViewCad
           (cached[:insert][1] + origin[1] - cached[:origin][1]).round(4)
         ]
         depth = (cached[:depth] + origin[2] - cached[:origin][2]).round(4)
-        append_block_reference(context, instance, cached[:block], insert, depth)
+        append_block_reference(context, instance, cached[:block], insert, depth, layer: outer_tag)
         context[:reused_block_references] += 1
         return :emitted
       end
@@ -659,6 +752,7 @@ module SketchupCurrentViewCad
             planar_cached[:block],
             reference[:insert],
             reference[:depth],
+            layer: outer_tag,
             rotation: reference[:rotation],
             xscale: reference[:xscale],
             yscale: reference[:yscale]
@@ -667,14 +761,11 @@ module SketchupCurrentViewCad
           return :emitted
         end
       end
-      if !preserved_fidelity && dense_stop_deadline_exceeded?(context)
-        context[:omitted_time_budget] += 1
-        return :emitted
-      end
       dense_sampling = bounded_mode && !preserved_fidelity
       entity_budget = block_entity_budget(context[:quality])
       sample_limit = entity_sample_limit(context[:quality])
-      hard_budget_mode = dense_sampling && dense_hard_deadline_exceeded?(context)
+      hard_budget_mode = dense_sampling &&
+                         (dense_hard_deadline_exceeded?(context) || dense_stop_deadline_exceeded?(context))
       if hard_budget_mode
         # Never erase a whole late furniture/sign component. Emit a compact
         # representative outline after the deadline so every visible root
@@ -749,6 +840,9 @@ module SketchupCurrentViewCad
         mesh_cleanup_pixels: mesh_cleanup_pixels,
         entity_sample_limit: sample_limit,
         light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil,
+        protected_child_budget: context[:quality] == 'balanced' ?
+                                  BALANCED_PROTECTED_CHILD_BUDGET :
+                                  LIGHT_PROTECTED_CHILD_BUDGET,
         light_budget_exhausted: false,
         skipped_hidden: 0,
         skipped_offscreen: 0,
@@ -809,7 +903,9 @@ module SketchupCurrentViewCad
         context[:block_hashes][geometry_hash] = block_name
       end
 
-      append_block_reference(context, instance, block_name, normalized[:insert], normalized[:depth])
+      append_block_reference(
+        context, instance, block_name, normalized[:insert], normalized[:depth], layer: outer_tag
+      )
       if cache_key
         origin = project(Geom::Point3d.new(0, 0, 0).transform(world_transform), context[:basis])
         context[:light_block_cache][cache_key] = {
@@ -968,7 +1064,7 @@ module SketchupCurrentViewCad
 
     def append_block_reference(
       context, instance, block_name, insert, depth,
-      rotation: 0.0, xscale: 1.0, yscale: 1.0
+      layer: nil, rotation: 0.0, xscale: 1.0, yscale: 1.0
     )
       source_name = instance.name.to_s.empty? ? instance.definition.name.to_s : instance.name.to_s
       context[:block_references] << {
@@ -978,7 +1074,7 @@ module SketchupCurrentViewCad
         rotation: rotation,
         xscale: xscale,
         yscale: yscale,
-        layer: "BLOCK_#{source_name}",
+        layer: layer || tag_name(instance) || 'Untagged',
         sourceId: instance.persistent_id,
         sourceName: source_name
       }
@@ -1264,7 +1360,7 @@ module SketchupCurrentViewCad
     def emit_edge(edge, entities, transform, outer_tag, context)
       return if edge.hidden?
 
-      tag = outer_tag || tag_name(edge) || 'Untagged'
+      tag = effective_tag_name(edge, outer_tag) || 'Untagged'
       curve = edge.curve
       if curve
         key = [entities.object_id, curve.object_id, transform.to_a.map { |value| value.round(8) }]
@@ -1455,7 +1551,7 @@ module SketchupCurrentViewCad
         alpha: alpha.round(4),
         paint: !material.nil?,
         layer: material ? "MATERIAL_#{material.display_name}" : 'SUCAD-OCCLUDER',
-        sourceLayer: outer_tag || tag_name(face) || 'Untagged',
+        sourceLayer: effective_tag_name(face, outer_tag) || 'Untagged',
         depth: (outer_points.sum { |point| point[2].to_f } / outer_points.length).round(4),
         loops: loops
       }
@@ -2003,6 +2099,32 @@ module SketchupCurrentViewCad
 
       name = layer.name.to_s
       name.empty? || name == 'Untagged' || name == 'Layer0' ? nil : name
+    end
+
+    # SketchUp geometry on Untagged inherits the containing instance tag, but a
+    # deliberately tagged nested entity must keep its own tag. The former
+    # `outer_tag || tag_name(entity)` rule flattened every descendant onto the
+    # first parent tag and made the CAD layer structure inaccurate.
+    def effective_tag_name(entity, outer_tag)
+      tag_name(entity) || outer_tag
+    end
+
+    def export_layers(model)
+      model.layers.filter_map do |layer|
+        name = layer.name.to_s
+        next if name.empty? || name == 'Untagged' || name == 'Layer0'
+
+        color = layer.respond_to?(:color) ? layer.color : nil
+        folder = layer.respond_to?(:folder) ? layer.folder : nil
+        {
+          name: name,
+          folder: folder && folder.respond_to?(:name) ? folder.name.to_s : nil,
+          visible: !layer.respond_to?(:visible?) || layer.visible?,
+          color: color && [color.red.to_i, color.green.to_i, color.blue.to_i]
+        }
+      end
+    rescue StandardError
+      []
     end
 
     def point_array(point)
