@@ -40,8 +40,10 @@ class GeometryOptimizationTests(unittest.TestCase):
             source,
         )
         self.assertIn("dense_sampling = bounded_mode && !preserved_fidelity", source)
-        self.assertIn("block_occlusion = context[:occlusion] &&", source)
-        self.assertIn("!consistent_repeated", source)
+        self.assertIn(
+            "block_occlusion = context[:occlusion] && visibility_state == :partial",
+            source,
+        )
         self.assertIn("occlusion: block_occlusion", source)
         self.assertIn("light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil", source)
         self.assertIn("elsif full_fidelity_block?(entity, context)", source)
@@ -51,15 +53,17 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("context[:profile][:depth_tile_pixels]", source)
         self.assertNotIn("occlusion: bounded_mode ? false : context[:occlusion]", source)
 
-    def test_repeated_preserved_instances_share_complete_geometry(self) -> None:
+    def test_repeated_preserved_instances_use_depth_aware_nested_occlusion(self) -> None:
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
         self.assertIn("consistent_repeated = bounded_mode", source)
         self.assertIn("instance.definition.instances.length > 1", source)
-        self.assertIn("consistent_repeated && visibility_state == :partial", source)
+        self.assertIn("visibility_state == :visible", source)
         self.assertIn("consistentRepeatedReferences", source)
         self.assertIn("projected[2] / [tolerance_mm, 0.1].max", source)
         self.assertIn("child_visibility = instance_visibility_state", source)
-        self.assertIn("context[:occlusion] = child_visibility == :partial && !consistent_nested", source)
+        self.assertIn("if context[:requested_occlusion]", source)
+        self.assertIn("context[:occlusion] = true", source)
+        self.assertIn("context[:occlusion] = child_visibility == :partial", source)
 
     def test_balanced_uses_distributed_sampling_priority_and_deadlines(self) -> None:
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")

@@ -528,11 +528,13 @@ module SketchupCurrentViewCad
         context[:light_mesh_cleanup] = fidelity_mode == :outline || fidelity_mode == :structural
         context[:mesh_cleanup_pixels] = 0.2 if fidelity_mode == :structural
         context[:fidelity] = 'full'
-        if previous_occlusion
+        if context[:requested_occlusion]
           # The enclosing dense wrapper may be only partly covered, but that
           # does not mean every nested chair/rail is partial. Classify each
-          # preserved child with exact, unshared rays before deciding whether
-          # its individual edges need clipping.
+          # preserved child with exact, unshared rays even when the wrapper's
+          # outer bounds looked clear. A table top can still cover supports
+          # inside that otherwise visible wrapper.
+          context[:occlusion] = true
           child_visibility = instance_visibility_state(
             entity,
             world_transform,
@@ -543,11 +545,11 @@ module SketchupCurrentViewCad
             context[:skipped_occluded] += 1
             return
           end
-          consistent_nested = context[:section].nil? &&
-                              entity.definition.instances.length > 1 &&
-                              (fidelity_mode == :full || fidelity_mode == :structural)
-          context[:occlusion] = child_visibility == :partial && !consistent_nested
-          context[:consistent_repeated_references] += 1 if consistent_nested
+          # A clear child stays complete, a covered child is discarded, and a
+          # genuinely partial child alone receives edge-level clipping. The
+          # depth-aware cache below keeps identical chairs stable without
+          # leaking supports or pads hidden beneath the table top.
+          context[:occlusion] = child_visibility == :partial
         else
           context[:occlusion] = false
         end
@@ -788,11 +790,9 @@ module SketchupCurrentViewCad
       context[:full_fidelity_blocks] += 1 if preserved_fidelity
       context[:structural_fidelity_blocks] += 1 if structural_priority
       context[:optimized_dense_blocks] += 1 unless preserved_fidelity
-      # A repeated preserved component must not acquire a different CAD
-      # definition merely because one instance grazes a depth-sampling tile.
-      # Fully covered instances are still discarded above. For a partial
-      # instance outside section views, reuse the canonical complete definition;
-      # material fills remain responsible for the visible surface ordering.
+      # Reuse repeated preserved components only when the whole instance is
+      # visible. Partial instances need their own clipped geometry because a
+      # shared complete block would expose supports and pads below table tops.
       consistent_repeated = bounded_mode &&
                             preserved_fidelity &&
                             context[:section].nil? &&
@@ -800,8 +800,7 @@ module SketchupCurrentViewCad
       cacheable = bounded_mode &&
                   instance_fully_on_kept_section_side?(instance, world_transform, context) &&
                   instance_fully_inside_view?(instance, world_transform, context) &&
-                  (visibility_state == :visible ||
-                   (consistent_repeated && visibility_state == :partial))
+                  visibility_state == :visible
       cache_key = if cacheable
                     light_block_cache_key(instance, world_transform, outer_tag, outer_material)
                   end
@@ -867,9 +866,7 @@ module SketchupCurrentViewCad
       # tile can erase a plain rail beside a perforated or high-poly screen.
       # Fully covered blocks were already removed above; only genuinely partial
       # blocks need edge-level clipping.
-      block_occlusion = context[:occlusion] &&
-                        visibility_state == :partial &&
-                        !consistent_repeated
+      block_occlusion = context[:occlusion] && visibility_state == :partial
       block_profile = if block_occlusion &&
                          (!preserved_fidelity || dense_soft_deadline_exceeded?(context))
                         dense_occlusion_profile(context[:profile], context[:quality])
