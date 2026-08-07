@@ -72,11 +72,13 @@ module SketchupCurrentViewCad
       effective_occlusion = section ? strict_section_occlusion : occlusion
       diagonal = [model.bounds.diagonal.to_f, 1000.0].max
       export_started = monotonic_time
-      # Leave enough of the three-minute Balanced target for material
-      # composition, DXF serialization and audit outside SketchUp.
-      dense_soft_seconds = quality.to_s == 'balanced' ? 72.0 : 55.0
-      dense_hard_seconds = quality.to_s == 'balanced' ? 105.0 : 80.0
-      dense_stop_seconds = quality.to_s == 'balanced' ? 135.0 : 100.0
+      # Balanced may spend up to five minutes end-to-end. Keep a final margin
+      # for material composition, DXF serialization and audit outside SketchUp.
+      # The longer middle stage is reserved for complete repeated furniture and
+      # structural components instead of expanding dense decoration uniformly.
+      dense_soft_seconds = quality.to_s == 'balanced' ? 100.0 : 55.0
+      dense_hard_seconds = quality.to_s == 'balanced' ? 145.0 : 80.0
+      dense_stop_seconds = quality.to_s == 'balanced' ? 200.0 : 100.0
       context = {
         model: model,
         basis: basis,
@@ -118,6 +120,7 @@ module SketchupCurrentViewCad
         skipped_offscreen: 0,
         skipped_sampled: 0,
         reused_block_references: 0,
+        consistent_repeated_references: 0,
         full_fidelity_blocks: 0,
         structural_fidelity_blocks: 0,
         full_fidelity_children: 0,
@@ -184,6 +187,7 @@ module SketchupCurrentViewCad
           blocks: context[:blocks].length,
           blockReferences: context[:block_references].length,
           reusedBlockReferences: context[:reused_block_references],
+          consistentRepeatedReferences: context[:consistent_repeated_references],
           fullFidelityBlocks: context[:full_fidelity_blocks],
           structuralFidelityBlocks: context[:structural_fidelity_blocks],
           fullFidelityChildren: context[:full_fidelity_children],
@@ -524,10 +528,31 @@ module SketchupCurrentViewCad
         context[:light_mesh_cleanup] = fidelity_mode == :outline || fidelity_mode == :structural
         context[:mesh_cleanup_pixels] = 0.2 if fidelity_mode == :structural
         context[:fidelity] = 'full'
-        if fidelity_mode == :full
-          context[:occlusion] = context[:requested_occlusion] unless context[:requested_occlusion].nil?
-          context[:profile] = context[:full_fidelity_profile] if context[:full_fidelity_profile]
+        if previous_occlusion
+          # The enclosing dense wrapper may be only partly covered, but that
+          # does not mean every nested chair/rail is partial. Classify each
+          # preserved child with exact, unshared rays before deciding whether
+          # its individual edges need clipping.
+          child_visibility = instance_visibility_state(
+            entity,
+            world_transform,
+            context,
+            fine: true
+          )
+          if child_visibility == :occluded
+            context[:skipped_occluded] += 1
+            return
+          end
+          consistent_nested = context[:section].nil? &&
+                              entity.definition.instances.length > 1 &&
+                              (fidelity_mode == :full || fidelity_mode == :structural)
+          context[:occlusion] = child_visibility == :partial && !consistent_nested
+          context[:consistent_repeated_references] += 1 if consistent_nested
+        else
+          context[:occlusion] = false
         end
+        context[:profile] = context[:full_fidelity_profile] if fidelity_mode == :full &&
+                                                                   context[:full_fidelity_profile]
         walk_entities(entity.definition.entities, world_transform, child_tag, child_material, context)
         return
       end
@@ -763,10 +788,20 @@ module SketchupCurrentViewCad
       context[:full_fidelity_blocks] += 1 if preserved_fidelity
       context[:structural_fidelity_blocks] += 1 if structural_priority
       context[:optimized_dense_blocks] += 1 unless preserved_fidelity
+      # A repeated preserved component must not acquire a different CAD
+      # definition merely because one instance grazes a depth-sampling tile.
+      # Fully covered instances are still discarded above. For a partial
+      # instance outside section views, reuse the canonical complete definition;
+      # material fills remain responsible for the visible surface ordering.
+      consistent_repeated = bounded_mode &&
+                            preserved_fidelity &&
+                            context[:section].nil? &&
+                            instance.definition.instances.length > 1
       cacheable = bounded_mode &&
                   instance_fully_on_kept_section_side?(instance, world_transform, context) &&
                   instance_fully_inside_view?(instance, world_transform, context) &&
-                  visibility_state == :visible
+                  (visibility_state == :visible ||
+                   (consistent_repeated && visibility_state == :partial))
       cache_key = if cacheable
                     light_block_cache_key(instance, world_transform, outer_tag, outer_material)
                   end
@@ -780,6 +815,7 @@ module SketchupCurrentViewCad
         depth = (cached[:depth] + origin[2] - cached[:origin][2]).round(4)
         append_block_reference(context, instance, cached[:block], insert, depth, layer: outer_tag)
         context[:reused_block_references] += 1
+        context[:consistent_repeated_references] += 1 if consistent_repeated
         return :emitted
       end
       planar_key = cacheable ? light_planar_block_cache_key(instance, outer_tag, outer_material) : nil
@@ -799,6 +835,7 @@ module SketchupCurrentViewCad
             yscale: reference[:yscale]
           )
           context[:reused_block_references] += 1
+          context[:consistent_repeated_references] += 1 if consistent_repeated
           return :emitted
         end
       end
@@ -812,8 +849,8 @@ module SketchupCurrentViewCad
         # representative outline after the deadline so every visible root
         # object still has editable CAD geometry.
         context[:skipped_time_budget] += 1
-        entity_budget = [entity_budget, context[:quality] == 'balanced' ? 220 : 150].min
-        sample_limit = [sample_limit, context[:quality] == 'balanced' ? 180 : 120].min
+        entity_budget = [entity_budget, context[:quality] == 'balanced' ? 600 : 150].min
+        sample_limit = [sample_limit, context[:quality] == 'balanced' ? 480 : 120].min
       elsif dense_sampling && dense_soft_deadline_exceeded?(context)
         entity_budget = [entity_budget, context[:quality] == 'balanced' ? 8_000 : 4_000].min
         sample_limit = [sample_limit, context[:quality] == 'balanced' ? 6_000 : 3_000].min
@@ -830,7 +867,9 @@ module SketchupCurrentViewCad
       # tile can erase a plain rail beside a perforated or high-poly screen.
       # Fully covered blocks were already removed above; only genuinely partial
       # blocks need edge-level clipping.
-      block_occlusion = context[:occlusion] && visibility_state == :partial
+      block_occlusion = context[:occlusion] &&
+                        visibility_state == :partial &&
+                        !consistent_repeated
       block_profile = if block_occlusion &&
                          (!preserved_fidelity || dense_soft_deadline_exceeded?(context))
                         dense_occlusion_profile(context[:profile], context[:quality])
@@ -892,6 +931,7 @@ module SketchupCurrentViewCad
         skipped_offscreen: 0,
         skipped_sampled: 0,
         reused_block_references: 0,
+        consistent_repeated_references: 0,
         full_fidelity_blocks: 0,
         structural_fidelity_blocks: 0,
         full_fidelity_children: 0,
@@ -980,6 +1020,7 @@ module SketchupCurrentViewCad
       context[:ray_errors] += block_context[:ray_errors]
       context[:full_fidelity_children] += block_context[:full_fidelity_children]
       context[:structural_fidelity_blocks] += block_context[:structural_fidelity_blocks]
+      context[:consistent_repeated_references] += block_context[:consistent_repeated_references]
       context[:skipped_time_budget] += block_context[:skipped_time_budget]
       context[:omitted_time_budget] += block_context[:omitted_time_budget]
       :emitted
@@ -1326,20 +1367,27 @@ module SketchupCurrentViewCad
       ratios.product(ratios).each do |x_ratio, y_ratio|
         x = min_x + ((max_x - min_x) * x_ratio)
         y = min_y + ((max_y - min_y) * y_ratio)
-        cache_key = [
-          fine ? :fine : :coarse,
-          tile_pixels,
-          ((x - viewport[:min_x]) / tile_mm).floor,
-          ((y - viewport[:min_y]) / tile_mm).floor
-        ]
-        if depth_cache.key?(cache_key)
+        # A screen tile alone is not a valid visibility-cache identity: a chair
+        # and the adjacent table/floor can occupy the same tile at different
+        # depths. Include depth for coarse probes, and bypass sharing entirely
+        # for preserved components whose nine exact rays are inexpensive.
+        cache_key = unless fine
+                      [
+                        :coarse,
+                        tile_pixels,
+                        ((x - viewport[:min_x]) / tile_mm).floor,
+                        ((y - viewport[:min_y]) / tile_mm).floor,
+                        (nearest_depth / [tolerance_mm, 0.1].max).round
+                      ]
+                    end
+        if cache_key && depth_cache.key?(cache_key)
           hit_depth = depth_cache[cache_key]
         else
           point = unproject(x, y, nearest_depth, context[:basis])
           origin = ray_origin(point, direction, context)
           hit = raytest_with_retry(context[:model], origin, direction)
           hit_depth = hit && project(hit[0], context[:basis])[2].to_f
-          depth_cache[cache_key] = hit_depth
+          depth_cache[cache_key] = hit_depth if cache_key
         end
         if hit_depth && hit_depth > nearest_depth + tolerance_mm
           covered += 1
@@ -2040,15 +2088,19 @@ module SketchupCurrentViewCad
       projected = project(point, context[:basis])
       tile_mm = context[:mm_per_pixel] * context[:profile][:depth_tile_pixels]
       viewport = context[:viewport]
+      tolerance_mm = VISIBILITY_TOLERANCE_INCH * MM_PER_INCH
       key = [
         ((projected[0] - viewport[:min_x]) / tile_mm).floor,
-        ((projected[1] - viewport[:min_y]) / tile_mm).floor
+        ((projected[1] - viewport[:min_y]) / tile_mm).floor,
+        # Do not let a foreground table/floor hit hide a chair edge at another
+        # depth just because both project into the same screen tile.
+        (projected[2] / [tolerance_mm, 0.1].max).round
       ]
       if context[:depth_cache].key?(key)
         hit_depth = context[:depth_cache][key]
         return true if hit_depth.nil?
 
-        return (hit_depth - projected[2]).abs <= (VISIBILITY_TOLERANCE_INCH * MM_PER_INCH)
+        return (hit_depth - projected[2]).abs <= tolerance_mm
       end
 
       direction = context[:basis][:forward]
@@ -2056,7 +2108,7 @@ module SketchupCurrentViewCad
       hit = raytest_with_retry(context[:model], origin, direction)
       hit_depth = hit && project(hit[0], context[:basis])[2]
       context[:depth_cache][key] = hit_depth
-      visible = hit_depth.nil? || (hit_depth - projected[2]).abs <= (VISIBILITY_TOLERANCE_INCH * MM_PER_INCH)
+      visible = hit_depth.nil? || (hit_depth - projected[2]).abs <= tolerance_mm
       context[:visibility_cache][key] = visible
       visible
     rescue StandardError

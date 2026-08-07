@@ -28,7 +28,8 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("visibility_state == :occluded", source)
         self.assertIn("visibility_state == :visible", source)
         self.assertIn("fine: preserved_fidelity", source)
-        self.assertIn("fine ? :fine : :coarse", source)
+        self.assertIn("cache_key = unless fine", source)
+        self.assertIn("nearest_depth / [tolerance_mm, 0.1].max", source)
 
     def test_balanced_simple_blocks_are_complete_and_exactly_occluded(self) -> None:
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
@@ -39,10 +40,8 @@ class GeometryOptimizationTests(unittest.TestCase):
             source,
         )
         self.assertIn("dense_sampling = bounded_mode && !preserved_fidelity", source)
-        self.assertIn(
-            "block_occlusion = context[:occlusion] && visibility_state == :partial",
-            source,
-        )
+        self.assertIn("block_occlusion = context[:occlusion] &&", source)
+        self.assertIn("!consistent_repeated", source)
         self.assertIn("occlusion: block_occlusion", source)
         self.assertIn("light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil", source)
         self.assertIn("elsif full_fidelity_block?(entity, context)", source)
@@ -51,6 +50,16 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("'mixed'", source)
         self.assertIn("context[:profile][:depth_tile_pixels]", source)
         self.assertNotIn("occlusion: bounded_mode ? false : context[:occlusion]", source)
+
+    def test_repeated_preserved_instances_share_complete_geometry(self) -> None:
+        source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
+        self.assertIn("consistent_repeated = bounded_mode", source)
+        self.assertIn("instance.definition.instances.length > 1", source)
+        self.assertIn("consistent_repeated && visibility_state == :partial", source)
+        self.assertIn("consistentRepeatedReferences", source)
+        self.assertIn("projected[2] / [tolerance_mm, 0.1].max", source)
+        self.assertIn("child_visibility = instance_visibility_state", source)
+        self.assertIn("context[:occlusion] = child_visibility == :partial && !consistent_nested", source)
 
     def test_balanced_uses_distributed_sampling_priority_and_deadlines(self) -> None:
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
