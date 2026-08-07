@@ -34,7 +34,10 @@ class GeometryOptimizationTests(unittest.TestCase):
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
         self.assertIn("BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD = 6_000", source)
         self.assertIn("full_fidelity = full_fidelity_block?", source)
-        self.assertIn("preserved_fidelity = full_fidelity || outline_priority", source)
+        self.assertIn(
+            "preserved_fidelity = full_fidelity || structural_priority || outline_priority",
+            source,
+        )
         self.assertIn("dense_sampling = bounded_mode && !preserved_fidelity", source)
         self.assertIn(
             "block_occlusion = context[:occlusion] && visibility_state == :partial",
@@ -68,6 +71,15 @@ class GeometryOptimizationTests(unittest.TestCase):
         self.assertIn("BALANCED_PROTECTED_CHILD_BUDGET = 8_000", source)
         self.assertIn("compact_full_fidelity_child?", source)
         self.assertNotIn("context[:omitted_time_budget] += 1\n        return :emitted", source)
+
+    def test_repeated_visual_structures_are_promoted_before_dense_sampling(self) -> None:
+        source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
+        self.assertIn("BALANCED_STRUCTURAL_DIRECT_THRESHOLD = 12_000", source)
+        self.assertIn("BALANCED_STRUCTURAL_WRAPPER_THRESHOLD = 90_000", source)
+        self.assertIn("structural_fidelity_block?", source)
+        self.assertIn("children_only = instance.definition.entities.all?", source)
+        self.assertIn("protected_structural_budget", source)
+        self.assertIn("'structural'", source)
 
     def test_nested_sketchup_tags_override_only_untagged_parent_inheritance(self) -> None:
         source = (ROOT / "scripts" / "export_current_view.rb").read_text(encoding="utf-8")
@@ -127,6 +139,20 @@ class GeometryOptimizationTests(unittest.TestCase):
             800,
             plant=False,
             optimization_class="full",
+        )
+        self.assertFalse(changed)
+        self.assertEqual(output, segments)
+
+    def test_structural_block_ignores_dense_line_cap(self) -> None:
+        segments = [
+            Segment((float(index), 0.0), (float(index), 100.0), "SU-RACK", "hard")
+            for index in range(3000)
+        ]
+        output, changed = optimize_block_segments(
+            segments,
+            800,
+            plant=False,
+            optimization_class="structural",
         )
         self.assertFalse(changed)
         self.assertEqual(output, segments)

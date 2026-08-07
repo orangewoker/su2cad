@@ -310,7 +310,7 @@ def optimize_block_segments(
     Their merged linework is intentional drafting geometry and must not be
     sampled merely because a global dense-block cap is lower.
     """
-    if optimization_class == "full":
+    if optimization_class in {"full", "structural"}:
         return segments, False
     protected = [segment for segment in segments if segment.fidelity == "full"]
     candidates = [segment for segment in segments if segment.fidelity != "full"]

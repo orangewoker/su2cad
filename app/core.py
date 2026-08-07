@@ -16,7 +16,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 

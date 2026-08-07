@@ -18,6 +18,9 @@ module SketchupCurrentViewCad
   BALANCED_ENTITY_SAMPLES_PER_COLLECTION = 24_000
   LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD = 1_000
   BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD = 6_000
+  BALANCED_STRUCTURAL_DIRECT_THRESHOLD = 12_000
+  BALANCED_STRUCTURAL_WRAPPER_THRESHOLD = 90_000
+  BALANCED_STRUCTURAL_WRAPPER_CHILDREN = 8
   LIGHT_COMPACT_CHILD_ENTITY_THRESHOLD = 400
   BALANCED_COMPACT_CHILD_ENTITY_THRESHOLD = 1_500
   LIGHT_PROTECTED_CHILD_BUDGET = 2_000
@@ -116,6 +119,7 @@ module SketchupCurrentViewCad
         skipped_sampled: 0,
         reused_block_references: 0,
         full_fidelity_blocks: 0,
+        structural_fidelity_blocks: 0,
         full_fidelity_children: 0,
         optimized_dense_blocks: 0,
         occluded_blocks: 0,
@@ -181,6 +185,7 @@ module SketchupCurrentViewCad
           blockReferences: context[:block_references].length,
           reusedBlockReferences: context[:reused_block_references],
           fullFidelityBlocks: context[:full_fidelity_blocks],
+          structuralFidelityBlocks: context[:structural_fidelity_blocks],
           fullFidelityChildren: context[:full_fidelity_children],
           optimizedDenseBlocks: context[:optimized_dense_blocks],
           occludedBlocks: context[:occluded_blocks],
@@ -340,6 +345,12 @@ module SketchupCurrentViewCad
                           BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD :
                           LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD
             planned_entities += definition_complexity(entity.definition, context, threshold)
+          elsif structural_fidelity_block?(entity, world_transform, context)
+            planned_entities += definition_complexity(
+              entity.definition,
+              context,
+              BALANCED_STRUCTURAL_WRAPPER_THRESHOLD
+            )
           elsif outline_fidelity_block?(entity, world_transform, context)
             outline_limit = quality.to_s == 'balanced' ? 150_000 : 60_000
             planned_entities += definition_complexity(entity.definition, context, outline_limit)
@@ -489,22 +500,29 @@ module SketchupCurrentViewCad
 
     def walk_light_child_entities(entity, world_transform, child_tag, child_material, context, plan)
       shared_budget = context[:light_entity_budget]
+      structural_mode = structural_fidelity_block?(entity, world_transform, context)
       fidelity_mode = if full_fidelity_block?(entity, context) &&
                          (!context[:time_compact] || compact_full_fidelity_child?(entity, context))
                         :full
+                      elsif structural_mode &&
+                            (!context[:time_compact] || compact_structural_child?(entity, context))
+                        :structural
                       elsif !context[:time_compact] && outline_fidelity_block?(entity, world_transform, context)
                         :outline
                       end
       if fidelity_mode
         context[:full_fidelity_children] += 1
+        context[:structural_fidelity_blocks] += 1 if fidelity_mode == :structural
         previous_sampling = context[:light_sampling]
         previous_cleanup = context[:light_mesh_cleanup]
+        previous_cleanup_pixels = context[:mesh_cleanup_pixels]
         previous_fidelity = context[:fidelity]
         previous_occlusion = context[:occlusion]
         previous_profile = context[:profile]
         context[:light_entity_budget] = nil
         context[:light_sampling] = false
-        context[:light_mesh_cleanup] = fidelity_mode == :outline
+        context[:light_mesh_cleanup] = fidelity_mode == :outline || fidelity_mode == :structural
+        context[:mesh_cleanup_pixels] = 0.2 if fidelity_mode == :structural
         context[:fidelity] = 'full'
         if fidelity_mode == :full
           context[:occlusion] = context[:requested_occlusion] unless context[:requested_occlusion].nil?
@@ -537,6 +555,7 @@ module SketchupCurrentViewCad
     ensure
       context[:light_sampling] = previous_sampling unless previous_sampling.nil?
       context[:light_mesh_cleanup] = previous_cleanup unless previous_cleanup.nil?
+      context[:mesh_cleanup_pixels] = previous_cleanup_pixels unless previous_cleanup_pixels.nil?
       context[:fidelity] = previous_fidelity unless previous_fidelity.nil?
       context[:occlusion] = previous_occlusion unless previous_occlusion.nil?
       context[:profile] = previous_profile unless previous_profile.nil?
@@ -559,6 +578,23 @@ module SketchupCurrentViewCad
       return false if complexity > threshold || complexity > remaining
 
       context[:protected_child_budget] = remaining - complexity
+      true
+    rescue StandardError
+      false
+    end
+
+    def compact_structural_child?(entity, context)
+      remaining = context[:protected_structural_budget].to_i
+      return false if remaining <= 0
+
+      complexity = definition_complexity(
+        entity.definition,
+        context,
+        BALANCED_STRUCTURAL_DIRECT_THRESHOLD
+      )
+      return false if complexity > BALANCED_STRUCTURAL_DIRECT_THRESHOLD || complexity > remaining
+
+      context[:protected_structural_budget] = remaining - complexity
       true
     rescue StandardError
       false
@@ -638,15 +674,17 @@ module SketchupCurrentViewCad
 
         world_transform = transform * entity.transformation
         full = full_fidelity_block?(entity, context)
-        outline = !full && outline_fidelity_block?(entity, world_transform, context)
+        structural = !full && structural_fidelity_block?(entity, world_transform, context)
+        outline = !full && !structural && outline_fidelity_block?(entity, world_transform, context)
         projected = bounds_corners(entity.definition.bounds).map do |point|
           project(point.transform(world_transform), context[:basis])
         end
         xs = projected.map { |point| point[0] }
         ys = projected.map { |point| point[1] }
         footprint = (xs.max - xs.min).abs * (ys.max - ys.min).abs
-        if full || outline
-          simple << [full ? 1 : 2, -footprint, index, entity]
+        if full || structural || outline
+          priority = full ? 1 : (structural ? 2 : 3)
+          simple << [priority, -footprint, index, entity]
           next
         end
 
@@ -703,8 +741,10 @@ module SketchupCurrentViewCad
     def emit_instance_block(instance, world_transform, outer_tag, outer_material, context)
       bounded_mode = bounded_block_quality?(context[:quality])
       full_fidelity = full_fidelity_block?(instance, context)
-      outline_priority = outline_fidelity_block?(instance, world_transform, context)
-      preserved_fidelity = full_fidelity || outline_priority
+      structural_priority = !full_fidelity && structural_fidelity_block?(instance, world_transform, context)
+      outline_priority = !full_fidelity && !structural_priority &&
+                         outline_fidelity_block?(instance, world_transform, context)
+      preserved_fidelity = full_fidelity || structural_priority || outline_priority
       # A coarse instance-depth tile is safe for dense furniture, but it can
       # erase an adjacent thin shelf or rail when both sample points land in
       # the same large tile. Simple blocks are cheap enough to classify with
@@ -721,6 +761,7 @@ module SketchupCurrentViewCad
         return :occluded
       end
       context[:full_fidelity_blocks] += 1 if preserved_fidelity
+      context[:structural_fidelity_blocks] += 1 if structural_priority
       context[:optimized_dense_blocks] += 1 unless preserved_fidelity
       cacheable = bounded_mode &&
                   instance_fully_on_kept_section_side?(instance, world_transform, context) &&
@@ -771,13 +812,15 @@ module SketchupCurrentViewCad
         # representative outline after the deadline so every visible root
         # object still has editable CAD geometry.
         context[:skipped_time_budget] += 1
-        entity_budget = [entity_budget, context[:quality] == 'balanced' ? 300 : 150].min
-        sample_limit = [sample_limit, context[:quality] == 'balanced' ? 240 : 120].min
+        entity_budget = [entity_budget, context[:quality] == 'balanced' ? 220 : 150].min
+        sample_limit = [sample_limit, context[:quality] == 'balanced' ? 180 : 120].min
       elsif dense_sampling && dense_soft_deadline_exceeded?(context)
         entity_budget = [entity_budget, context[:quality] == 'balanced' ? 8_000 : 4_000].min
         sample_limit = [sample_limit, context[:quality] == 'balanced' ? 6_000 : 3_000].min
       end
-      mesh_cleanup_pixels = if hard_budget_mode
+      mesh_cleanup_pixels = if structural_priority
+                              0.2
+                            elsif hard_budget_mode
                               context[:quality] == 'balanced' ? 0.8 : 1.2
                             else
                               context[:quality] == 'light' ? 0.75 : 0.4
@@ -836,19 +879,21 @@ module SketchupCurrentViewCad
         fidelity: preserved_fidelity ? 'full' : 'dense',
         light_sampling: dense_sampling,
         time_compact: hard_budget_mode,
-        light_mesh_cleanup: dense_sampling || outline_priority,
+        light_mesh_cleanup: dense_sampling || outline_priority || structural_priority,
         mesh_cleanup_pixels: mesh_cleanup_pixels,
         entity_sample_limit: sample_limit,
         light_entity_budget: dense_sampling ? { remaining: entity_budget } : nil,
         protected_child_budget: context[:quality] == 'balanced' ?
                                   BALANCED_PROTECTED_CHILD_BUDGET :
                                   LIGHT_PROTECTED_CHILD_BUDGET,
+        protected_structural_budget: context[:quality] == 'balanced' ? 40_000 : 0,
         light_budget_exhausted: false,
         skipped_hidden: 0,
         skipped_offscreen: 0,
         skipped_sampled: 0,
         reused_block_references: 0,
         full_fidelity_blocks: 0,
+        structural_fidelity_blocks: 0,
         full_fidelity_children: 0,
         optimized_dense_blocks: 0,
         occluded_blocks: 0,
@@ -875,7 +920,9 @@ module SketchupCurrentViewCad
       return :fallback unless normalized
 
       contains_full_fidelity = block_context[:lines].any? { |line| line[:fidelity] == 'full' }
-      optimization_class = if preserved_fidelity
+      optimization_class = if structural_priority
+                             'structural'
+                           elsif preserved_fidelity
                              'full'
                            elsif contains_full_fidelity
                              'mixed'
@@ -932,6 +979,7 @@ module SketchupCurrentViewCad
       context[:material_faces] += block_context[:material_faces]
       context[:ray_errors] += block_context[:ray_errors]
       context[:full_fidelity_children] += block_context[:full_fidelity_children]
+      context[:structural_fidelity_blocks] += block_context[:structural_fidelity_blocks]
       context[:skipped_time_budget] += block_context[:skipped_time_budget]
       context[:omitted_time_budget] += block_context[:omitted_time_budget]
       :emitted
@@ -965,6 +1013,49 @@ module SketchupCurrentViewCad
                     BALANCED_FULL_FIDELITY_ENTITY_THRESHOLD :
                     LIGHT_FULL_FIDELITY_ENTITY_THRESHOLD
       definition_complexity(instance.definition, context, threshold) <= threshold
+    rescue StandardError
+      false
+    end
+
+    # Raw recursive entity count is a poor proxy for drafting complexity. A
+    # repeated chair can contain thousands of triangulated faces, and a rack
+    # wrapper can contain only two children while those children expand to tens
+    # of thousands of entities. Promote these bounded, visibly significant,
+    # repeated assemblies so their structural linework is extracted once and
+    # reused as a CAD block instead of being reduced to a few sampled fragments.
+    def structural_fidelity_block?(instance, world_transform, context)
+      return false unless context[:quality] == 'balanced'
+      instance_count = instance.definition.instances.length
+      return false if instance_count < 2
+
+      width, height = projected_definition_size(instance.definition, world_transform, context[:basis])
+      width_pixels = width.abs / context[:mm_per_pixel]
+      height_pixels = height.abs / context[:mm_per_pixel]
+      return false if [width_pixels, height_pixels].max < 4.0
+      return false if width_pixels * height_pixels < 12.0
+
+      direct = instance.definition.entities.length.to_i
+      if direct <= BALANCED_STRUCTURAL_DIRECT_THRESHOLD
+        recursive = definition_complexity(
+          instance.definition,
+          context,
+          BALANCED_STRUCTURAL_DIRECT_THRESHOLD
+        )
+        return true if recursive <= BALANCED_STRUCTURAL_DIRECT_THRESHOLD
+      end
+
+      return false if direct > BALANCED_STRUCTURAL_WRAPPER_CHILDREN
+      return false if instance_count < 3
+      children_only = instance.definition.entities.all? do |entity|
+        entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+      end
+      return false unless children_only
+
+      definition_complexity(
+        instance.definition,
+        context,
+        BALANCED_STRUCTURAL_WRAPPER_THRESHOLD
+      ) <= BALANCED_STRUCTURAL_WRAPPER_THRESHOLD
     rescue StandardError
       false
     end
