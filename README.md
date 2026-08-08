@@ -93,15 +93,15 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 
 ## 桌面应用
 
-`dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。它直接连接本机 SketchUp Bridge，并在窗口中完成参数设置、进度显示、DXF 生成和 CAD 打开。SketchUp 端仍需安装并启动本地 Bridge 插件。
+`dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。v0.8.0 起前端迁移到 Tauri 2 + React + TypeScript，使用 WebView2 渲染响应式液态玻璃界面；原有 Python 几何导出核心作为内置 Sidecar 运行。应用直接连接本机 SketchUp Bridge，并在窗口中完成参数设置、进度显示、DXF 生成和 CAD 打开。SketchUp 端仍需安装并启动本地 Bridge 插件。
 
-下载 GitHub Release 中的 `SU2CAD-0.7.3-windows-x64.zip`，完整解压后运行：
+下载 GitHub Release 中的 `SU2CAD_0.8.0_x64-setup.exe` 并安装。安装包已包含 Python、NumPy、Shapely 和 DXF 引擎，用户不需要另行安装 Node.js、Rust 或 Python。
 
 ```text
-SU2CAD\SU2CAD.exe
+%LOCALAPPDATA%\SU2CAD\su2cad.exe
 ```
 
-不要只复制单独的 EXE，`_internal` 目录包含 Python、Tk、NumPy 和 DXF 引擎运行时。
+新界面使用自定义无边框标题栏、柔和环境光、实时模糊和高对比绿色主操作；在 900×700 等较小窗口中会自动将设置收进侧边抽屉，底部输出目录和生成按钮始终可见。
 
 桌面功能包括：
 
@@ -147,23 +147,27 @@ SU2CAD\SU2CAD.exe
 - 自动清理材质名和图层名中的 emoji 等 AutoCAD DXF 不支持字符，避免 ezdxf 审计通过但 AutoCAD 拒绝打开
 - 材质构建失败时自动降级生成完整纯线稿 DXF
 - `%APPDATA%\SU2CAD\settings.json` 设置持久化
+- Tauri 主进程与 Python Sidecar 通过 JSON Lines 通信，导出在后台线程运行；进度、总耗时、取消、日志和最近输出都保留
 
-源码启动：
+前端开发预览：
 
 ```powershell
-python .\app\su2cad_app.py
+Set-Location .\desktop
+npm install
+npm run dev
 ```
 
-构建 Windows 应用：
+构建 Windows 安装包（会先用 PyInstaller 生成 Python Sidecar，再执行 Tauri 发布构建）：
 
 ```powershell
-pwsh -NoProfile -File .\build_app.ps1
+pwsh -NoProfile -File .\build_tauri.ps1
 ```
 
 构建结果：
 
 ```text
-dist\SU2CAD\SU2CAD.exe
+desktop\src-tauri\target\release\su2cad.exe
+desktop\src-tauri\target\release\bundle\nsis\SU2CAD_0.8.0_x64-setup.exe
 ```
 
 桌面应用会将设置和最近输出记录保存在：
@@ -290,11 +294,17 @@ su2cad/
 ├── SKILL.md
 ├── README.md
 ├── SU2CAD.spec
+├── SU2CADCore.spec
 ├── build_app.ps1
+├── build_tauri.ps1
 ├── requirements.txt
 ├── app/
 │   ├── core.py
-│   └── su2cad_app.py
+│   ├── sidecar.py
+│   └── su2cad_app.py       # v0.7 兼容界面
+├── desktop/
+│   ├── src/                # React/TypeScript 液态玻璃界面
+│   └── src-tauri/          # Tauri 2 Windows 壳和安装包配置
 ├── agents/
 │   └── openai.yaml
 ├── references/

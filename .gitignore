@@ -2,6 +2,12 @@ __pycache__/
 *.py[cod]
 scripts/vendor/
 *.json
+!desktop/package.json
+!desktop/package-lock.json
+!desktop/tsconfig.json
+!desktop/tsconfig.node.json
+!desktop/src-tauri/tauri.conf.json
+!desktop/src-tauri/capabilities/default.json
 *.dxf
 *.dwg
 .DS_Store

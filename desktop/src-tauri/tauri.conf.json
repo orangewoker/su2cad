@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SU2CAD",
+  "version": "0.8.0",
+  "identifier": "com.orangewoker.su2cad",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "SU2CAD 0.8.0",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 860,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "shadow": true,
+        "backgroundColor": "#e9f1f5"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/su2cad-core"],
+    "publisher": "SU2CAD",
+    "shortDescription": "SketchUp 可视视图轻量 CAD 导出工具",
+    "longDescription": "将 SketchUp 当前可见视图转换为带材质色块、可编辑块和标准图框的 DXF。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

@@ -7,6 +7,8 @@ description: Convert the active Windows SketchUp viewport into lightweight AutoC
 
 Generate a true-size DXF from the open SketchUp model and current camera direction. Use the local SketchUp Ruby bridge for geometry access and `ezdxf` for deterministic CAD construction.
 
+The standalone v0.8 desktop application uses a Tauri 2 + React/TypeScript liquid-glass frontend and runs the same Python exporter as a bundled JSON-lines Sidecar. UI work must not fork or duplicate the geometry rules in this skill: settings, progress, cancellation, recent outputs, and CAD opening are protocol concerns, while projection and DXF construction remain in `app/core.py` and `scripts/`.
+
 ## Workflow
 
 1. Confirm SketchUp and AutoCAD are open. Do not save or alter the SketchUp model.
