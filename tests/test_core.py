@@ -115,6 +115,13 @@ class CoreTests(unittest.TestCase):
         self.assertIn("repair_cad_dialogs.ps1", command[-1])
         self.assertNotIn("acad.exe", " ".join(command).casefold())
 
+    def test_process_detection_recognizes_open_sketchup_and_cad(self) -> None:
+        completed_sketchup = type("Completed", (), {"stdout": "SketchUp.exe 123 Console"})()
+        completed_cad = type("Completed", (), {"stdout": "acad.exe 456 Console"})()
+        with patch("core.subprocess.run", side_effect=[completed_sketchup, completed_cad]):
+            self.assertTrue(core.sketchup_is_running())
+            self.assertTrue(core.cad_is_running())
+
     def test_http_500_preserves_bridge_error_details(self) -> None:
         payload = {
             "ok": False,

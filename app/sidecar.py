@@ -19,6 +19,7 @@ from app.core import (
     cad_is_running,
     export_current_view,
     open_in_cad,
+    sketchup_is_running,
 )
 from app.integrations import integration_status, install_plugins
 
@@ -78,17 +79,30 @@ class SidecarServer:
             self.output.flush()
 
     def _status(self, request_id: str | None) -> None:
+        sketchup_running = sketchup_is_running()
+        cad_running = cad_is_running()
         try:
             health = bridge_health(timeout=2)
         except Exception as exc:
             health = {"ok": False, "running": False, "error": str(exc)}
+        try:
+            integrations = integration_status()
+        except Exception as exc:
+            integrations = {
+                "sketchup": [],
+                "cad": [],
+                "cadPluginInstalled": False,
+                "cadPlugin": {},
+                "error": str(exc),
+            }
         self.emit(
             "status",
             requestId=request_id,
             health=health,
-            cadRunning=cad_is_running(),
+            sketchupRunning=sketchup_running,
+            cadRunning=cad_running,
             exporting=bool(self._export_thread and self._export_thread.is_alive()),
-            integrations=integration_status(),
+            integrations=integrations,
         )
 
     def _export(self, request_id: str, raw: dict[str, Any]) -> None:
@@ -229,6 +243,10 @@ class SidecarServer:
     def run(self, input_stream: TextIO | None = None) -> None:
         source = input_stream or sys.stdin
         self.emit("ready", version=APP_VERSION)
+        # Emit a delayed snapshot even if the very early `ready` line is missed by
+        # WebView/sidecar startup scheduling. Commands received during this check
+        # remain buffered on stdin and are handled immediately afterwards.
+        self._status(None)
         for raw_line in source:
             line = raw_line.strip()
             if not line:

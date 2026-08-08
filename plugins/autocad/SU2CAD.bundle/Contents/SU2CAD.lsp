@@ -19,7 +19,7 @@
   (if stream
     (progn
       (write-line
-        (strcat "{\"ok\":true,\"pluginVersion\":\"0.8.1\",\"product\":\"" product
+        (strcat "{\"ok\":true,\"pluginVersion\":\"0.8.2\",\"product\":\"" product
                 "\",\"acadVersion\":\"" version "\",\"locale\":\"" locale "\"}")
         stream)
       (close stream)
@@ -52,5 +52,5 @@
 (setvar "FILEDIA" 1)
 (setvar "CMDDIA" 1)
 (su2cad-write-status)
-(princ "\nSU2CAD AutoCAD Helper 0.8.1 loaded. Commands: SU2CADSTATUS, SU2CADFIXDIALOGS, SU2CADOPEN.")
+(princ "\nSU2CAD AutoCAD Helper 0.8.2 loaded. Commands: SU2CADSTATUS, SU2CADFIXDIALOGS, SU2CADOPEN.")
 (princ)

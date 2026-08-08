@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ApplicationPackage SchemaVersion="1.0"
-                    AppVersion="0.8.1"
+                    AppVersion="0.8.2"
                     ProductCode="{7E95E22D-A4D4-4C4D-9CA6-A21E48A42B3E}"
                     Name="SU2CAD AutoCAD Helper"
                     Description="SU2CAD dialog repair and AutoCAD version reporting helper"
@@ -10,7 +10,7 @@
   <Components>
     <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R22.0" SeriesMax="R26.0" />
     <ComponentEntry AppName="SU2CAD Helper"
-                    Version="0.8.1"
+                    Version="0.8.2"
                     ModuleName="./Contents/SU2CAD.lsp"
                     AppDescription="Restores CAD dialogs and reports the running CAD version to SU2CAD"
                     LoadOnAutoCADStartup="True">

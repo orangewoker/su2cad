@@ -56,6 +56,8 @@ class SidecarTests(unittest.TestCase):
         ), mock.patch("app.sidecar.bridge_health", return_value={"ok": True, "running": True}), mock.patch(
             "app.sidecar.cad_is_running", return_value=True
         ), mock.patch(
+            "app.sidecar.sketchup_is_running", return_value=True
+        ), mock.patch(
             "app.sidecar.integration_status", return_value={"sketchup": [], "cad": [], "cadPluginInstalled": False, "cadPlugin": {}}
         ):
             save_settings({"paper_size": "AUTO"})
@@ -69,8 +71,12 @@ class SidecarTests(unittest.TestCase):
             )
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(events[0]["type"], "ready")
-        self.assertEqual(events[1]["settings"]["paper_size"], "AUTO")
-        self.assertTrue(events[2]["cadRunning"])
+        settings_event = next(item for item in events if item["type"] == "settings")
+        status_events = [item for item in events if item["type"] == "status"]
+        self.assertEqual(settings_event["settings"]["paper_size"], "AUTO")
+        self.assertTrue(status_events[0]["cadRunning"])
+        self.assertTrue(status_events[0]["sketchupRunning"])
+        self.assertGreaterEqual(len(status_events), 2)
 
     def test_plugin_install_protocol_reports_detected_versions(self) -> None:
         output = io.StringIO()

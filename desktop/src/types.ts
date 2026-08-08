@@ -83,6 +83,7 @@ export interface SidecarEvent {
   settings?: Partial<ExportSettings>;
   health?: Record<string, unknown>;
   cadRunning?: boolean;
+  sketchupRunning?: boolean;
   exporting?: boolean;
   integrations?: Integrations;
   restartRequired?: boolean;

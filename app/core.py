@@ -16,7 +16,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -213,6 +213,21 @@ def cad_is_running() -> bool:
         check=False,
     )
     return "acad.exe" in completed.stdout.casefold()
+
+
+def sketchup_is_running() -> bool:
+    if os.name != "nt":
+        return False
+    completed = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq SketchUp.exe", "/NH"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        creationflags=CREATE_NO_WINDOW,
+        check=False,
+    )
+    return "sketchup.exe" in completed.stdout.casefold()
 
 
 def discover_cad_executables() -> list[Path]:

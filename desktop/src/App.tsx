@@ -115,6 +115,7 @@ function App() {
   const [settings, setSettings] = useState<ExportSettings>(DEFAULT_SETTINGS);
   const [settingsReady, setSettingsReady] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [sketchupRunning, setSketchupRunning] = useState(false);
   const [cadRunning, setCadRunning] = useState(false);
   const [modelTitle, setModelTitle] = useState("正在连接 SketchUp…");
   const [taskState, setTaskState] = useState<TaskState>("idle");
@@ -152,7 +153,7 @@ function App() {
     const unsubscribe = sidecar.subscribe((event: SidecarEvent) => {
       if (event.type === "ready") {
         setServiceError("");
-        appendLog(`SU2CAD ${event.version || "0.8.1"} 核心服务已就绪`);
+        appendLog(`SU2CAD ${event.version || "0.8.2"} 核心服务已就绪`);
         void sidecar.send("loadSettings");
         void sidecar.send("status");
         return;
@@ -166,12 +167,15 @@ function App() {
         const health = event.health || {};
         const running = Boolean(health.ok && health.running);
         setConnected(running);
+        setSketchupRunning(Boolean(event.sketchupRunning) || running);
         setCadRunning(Boolean(event.cadRunning));
         if (event.integrations) setIntegrations(event.integrations);
         if (running) {
           const title = String(health.title || "未命名模型");
           const version = String(health.sketchup_version || "");
           setModelTitle(`${title}${version ? `  ·  SketchUp ${version}` : ""}`);
+        } else if (event.sketchupRunning) {
+          setModelTitle("SketchUp 已打开，正在等待 Bridge 插件连接");
         } else {
           setModelTitle("打开 SketchUp 并启动 SU2CAD / Codex Bridge");
         }
@@ -266,16 +270,23 @@ function App() {
       setModelTitle("界面预览模式");
       return unsubscribe;
     }
-    void sidecar.start().catch((error) => setServiceError(String(error)));
+    void sidecar.start()
+      .then(async () => {
+        // Do not rely solely on the sidecar's first stdout line: on very fast
+        // packaged starts it can arrive before WebView scheduling settles.
+        await sidecar.send("loadSettings");
+        await sidecar.send("status");
+      })
+      .catch((error) => setServiceError(String(error)));
     return unsubscribe;
   }, [appendLog, saveSettings]);
 
   useEffect(() => {
     const statusTimer = window.setInterval(() => {
       if (taskState !== "running") void sidecar.send("status").catch(() => undefined);
-    }, 8000);
+    }, connected && cadRunning ? 8000 : 2500);
     return () => window.clearInterval(statusTimer);
-  }, [taskState]);
+  }, [taskState, connected, cadRunning]);
 
   useEffect(() => {
     if (taskState !== "running") return;
@@ -374,7 +385,7 @@ function App() {
           <strong>{modelTitle}</strong>
         </div>
         <div className="connection-cluster">
-          <span className={`status-chip ${connected ? "online" : "offline"}`}><i />SketchUp {connected ? "已连接" : "未连接"}</span>
+          <span className={`status-chip ${connected ? "online" : sketchupRunning ? "standby" : "offline"}`}><i />SketchUp {connected ? "已连接" : sketchupRunning ? "已打开 · 插件未连接" : "未运行"}</span>
           <span className={`status-chip ${cadRunning ? "online" : "standby"}`}><i />CAD {cadRunning ? "已运行" : "未运行"}</span>
           <button className="plugin-button" type="button" onClick={openPluginManager}><Puzzle size={16} /><span>插件</span></button>
           <button className="icon-button" type="button" aria-label="刷新连接" onClick={() => void sidecar.send("status")}><RefreshCw size={17} /></button>
