@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0"
+                    AppVersion="0.8.1"
+                    ProductCode="{7E95E22D-A4D4-4C4D-9CA6-A21E48A42B3E}"
+                    Name="SU2CAD AutoCAD Helper"
+                    Description="SU2CAD dialog repair and AutoCAD version reporting helper"
+                    Author="SU2CAD">
+  <CompanyDetails Name="SU2CAD" />
+  <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R22.0" SeriesMax="R26.0" />
+  <Components>
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R22.0" SeriesMax="R26.0" />
+    <ComponentEntry AppName="SU2CAD Helper"
+                    Version="0.8.1"
+                    ModuleName="./Contents/SU2CAD.lsp"
+                    AppDescription="Restores CAD dialogs and reports the running CAD version to SU2CAD"
+                    LoadOnAutoCADStartup="True">
+      <Commands GroupName="SU2CAD">
+        <Command Global="SU2CADSTATUS" Local="SU2CADSTATUS" />
+        <Command Global="SU2CADFIXDIALOGS" Local="SU2CADFIXDIALOGS" />
+        <Command Global="SU2CADOPEN" Local="SU2CADOPEN" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

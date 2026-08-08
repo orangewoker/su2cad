@@ -14,6 +14,8 @@ a = Analysis(
     datas=[
         (str(root / "scripts" / "export_current_view.rb"), "scripts"),
         (str(root / "scripts" / "repair_cad_dialogs.ps1"), "scripts"),
+        (str(root / "plugins" / "sketchup"), "plugins/sketchup"),
+        (str(root / "plugins" / "autocad"), "plugins/autocad"),
     ],
     hiddenimports=[],
     hookspath=[],

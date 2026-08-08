@@ -1,6 +1,6 @@
 [package]
 name = "su2cad"
-version = "0.8.0"
+version = "0.8.1"
 description = "SketchUp current view to editable CAD"
 authors = ["orangewoker"]
 edition = "2021"

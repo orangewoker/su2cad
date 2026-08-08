@@ -7,7 +7,7 @@ description: Convert the active Windows SketchUp viewport into lightweight AutoC
 
 Generate a true-size DXF from the open SketchUp model and current camera direction. Use the local SketchUp Ruby bridge for geometry access and `ezdxf` for deterministic CAD construction.
 
-The standalone v0.8 desktop application uses a Tauri 2 + React/TypeScript liquid-glass frontend and runs the same Python exporter as a bundled JSON-lines Sidecar. UI work must not fork or duplicate the geometry rules in this skill: settings, progress, cancellation, recent outputs, and CAD opening are protocol concerns, while projection and DXF construction remain in `app/core.py` and `scripts/`.
+The standalone v0.8 desktop application uses a Tauri 2 + React/TypeScript liquid-glass frontend and runs the same Python exporter as a bundled JSON-lines Sidecar. UI work must not fork or duplicate the geometry rules in this skill: settings, progress, cancellation, recent outputs, application/plugin discovery, and CAD opening are protocol concerns, while projection and DXF construction remain in `app/core.py` and `scripts/`.
 
 ## Workflow
 
@@ -58,6 +58,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 - Treat `MaxBlockLines` as a dense-block control. Never apply its line sampling to a block marked `optimizationClass: full`; ordinary groups, sign lettering, and other simple components must retain all merged linework.
 - Report live elapsed time in the desktop task area and include total elapsed seconds in desktop and PowerShell results.
 - Keep desktop setting explanations fully visible beside or below their controls. In Recent Output, deleting a record must also delete its DXF after confirmation, while clearing the list must never delete files.
+- Detect installed SketchUp and AutoCAD hosts dynamically instead of binding to one release year. Install the SketchUp bridge into every detected current-user profile and install the AutoCAD helper as a version-neutral Autodesk ApplicationPlugins bundle. Also publish standalone RBZ and Bundle packages for sharing.
 - For active section views, start visibility rays immediately behind the cut plane so removed foreground geometry cannot hide valid interior details.
 - Keep section intersections unconditionally, but clip ordinary lines and curves to their actually visible intervals.
 - Merge collinear fragments and write curves as one CAD circle, arc, spline, or polyline object.

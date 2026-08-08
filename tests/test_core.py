@@ -82,6 +82,25 @@ class CoreTests(unittest.TestCase):
     def test_bridge_installation_is_detectable(self) -> None:
         self.assertTrue(core.find_bridge_main().is_file())
 
+    def test_active_bridge_selection_supports_legacy_and_native_plugins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = root / "su2cad_bridge" / "main.rb"
+            legacy = root / "codex_sketchup_bridge" / "main.rb"
+            native.parent.mkdir(parents=True)
+            legacy.parent.mkdir(parents=True)
+            native.write_text("TOKEN = 'native'", encoding="utf-8")
+            legacy.write_text("TOKEN = 'legacy'", encoding="utf-8")
+
+            def fake_request(path, **kwargs):
+                token = kwargs["headers"]["X-Codex-SketchUp-Token"]
+                if token == "legacy":
+                    return {"ok": True, "running": True}
+                raise core.BridgeRequestError("Unauthorized")
+
+            with patch("core.find_bridge_mains", return_value=[native, legacy]), patch("core._request_json", side_effect=fake_request):
+                self.assertEqual(core.find_active_bridge_main(), legacy)
+
     def test_desktop_icon_exists(self) -> None:
         self.assertTrue((core.resource_root() / "assets" / "su2cad.ico").is_file())
         for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):

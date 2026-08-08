@@ -16,7 +16,7 @@ from typing import Callable
 
 
 APP_NAME = "SU2CAD"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.8.1"
 BRIDGE_URL = "http://127.0.0.1:8765"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -145,11 +145,14 @@ def bridge_health(timeout: int = 3) -> dict:
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
-    match = re.search(r"SketchUp\s+(\d+(?:\.\d+)*)", str(path))
-    return tuple(int(part) for part in match.group(1).split(".")) if match else (0,)
+    match = re.search(r"(?:SketchUp|AutoCAD)\s+(\d+(?:\.\d+)*)", str(path), re.IGNORECASE)
+    if match:
+        return tuple(int(part) for part in match.group(1).split("."))
+    numbers = re.findall(r"\d+", path.name)
+    return tuple(int(part) for part in numbers) if numbers else (0,)
 
 
-def find_bridge_main() -> Path:
+def find_bridge_mains() -> list[Path]:
     appdata = Path(os.environ.get("APPDATA", ""))
     base = appdata / "SketchUp"
     candidates: list[Path] = []
@@ -157,7 +160,15 @@ def find_bridge_main() -> Path:
         candidates.extend(base.glob(f"SketchUp */SketchUp/Plugins/{bridge_name}/main.rb"))
     if not candidates:
         raise FileNotFoundError("未找到 SketchUp Bridge 插件 main.rb")
-    return max(candidates, key=_version_key)
+    return sorted(
+        candidates,
+        key=lambda path: (_version_key(path), path.parent.name.casefold() == "su2cad_bridge"),
+        reverse=True,
+    )
+
+
+def find_bridge_main() -> Path:
+    return find_bridge_mains()[0]
 
 
 def read_bridge_token(bridge_main: Path) -> str:
@@ -166,6 +177,27 @@ def read_bridge_token(bridge_main: Path) -> str:
     if not match:
         raise RuntimeError("无法读取 SketchUp Bridge 本地令牌")
     return match.group(1)
+
+
+def find_active_bridge_main() -> Path:
+    """Match the bridge that owns the live port when legacy and SU2CAD plugins coexist."""
+    failures: list[str] = []
+    for bridge_main in find_bridge_mains():
+        try:
+            token = read_bridge_token(bridge_main)
+            response = _request_json(
+                "/command",
+                method="POST",
+                body={"command": "ping", "args": {}, "timeout_ms": 2_000},
+                headers={"X-Codex-SketchUp-Token": token},
+                timeout=3,
+            )
+            if response.get("ok"):
+                return bridge_main
+        except Exception as exc:
+            failures.append(f"{bridge_main}: {exc}")
+    detail = failures[-1] if failures else "未找到候选插件"
+    raise RuntimeError(f"无法匹配当前运行的 SketchUp Bridge：{detail}")
 
 
 def cad_is_running() -> bool:
@@ -181,6 +213,46 @@ def cad_is_running() -> bool:
         check=False,
     )
     return "acad.exe" in completed.stdout.casefold()
+
+
+def discover_cad_executables() -> list[Path]:
+    """Find installed AutoCAD hosts without assuming a specific release year."""
+    candidates: list[Path] = []
+    roots = {
+        Path(os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles") or r"C:\Program Files"),
+        Path(os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"),
+    }
+    for root in roots:
+        candidates.extend(root.glob("Autodesk/AutoCAD */acad.exe"))
+        candidates.extend(root.glob("Autodesk/AutoCAD*/*/acad.exe"))
+    located = shutil.which("acad.exe")
+    if located:
+        candidates.append(Path(located))
+    if os.name == "nt":
+        try:
+            import winreg
+
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for flags in (winreg.KEY_READ, winreg.KEY_READ | winreg.KEY_WOW64_64KEY, winreg.KEY_READ | winreg.KEY_WOW64_32KEY):
+                    try:
+                        with winreg.OpenKey(
+                            hive,
+                            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\acad.exe",
+                            0,
+                            flags,
+                        ) as key:
+                            value, _ = winreg.QueryValueEx(key, None)
+                            if value:
+                                candidates.append(Path(str(value).strip('"')))
+                    except OSError:
+                        continue
+        except (ImportError, OSError):
+            pass
+    unique: dict[str, Path] = {}
+    for candidate in candidates:
+        if candidate.is_file():
+            unique.setdefault(str(candidate).casefold(), candidate)
+    return sorted(unique.values(), key=lambda path: _version_key(path), reverse=True)
 
 
 def repair_cad_dialogs() -> bool:
@@ -215,7 +287,6 @@ def open_in_cad(path: Path) -> bool:
     # Repair the already-running instance before asking Autodesk to open DXF.
     repair_cad_dialogs()
     launcher = Path(r"C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe")
-    acad = Path(r"C:\Program Files\Autodesk\AutoCAD 2025\acad.exe")
     if launcher.exists():
         subprocess.Popen(
             [str(launcher), "/O", str(path)],
@@ -223,8 +294,9 @@ def open_in_cad(path: Path) -> bool:
             close_fds=True,
         )
         return True
-    if acad.exists():
-        subprocess.Popen([str(acad), str(path)], close_fds=True)
+    cad_hosts = discover_cad_executables()
+    if cad_hosts:
+        subprocess.Popen([str(cad_hosts[0]), str(path)], close_fds=True)
         return True
     if os.name == "nt":
         os.startfile(path)  # type: ignore[attr-defined]
@@ -406,7 +478,7 @@ def export_current_view(
     json_path = output_directory / f"{safe_title}_current_view_{timestamp}.json"
     provisional_dxf = output_directory / f"{safe_title}_current_view_{timestamp}.dxf"
 
-    bridge_main = find_bridge_main()
+    bridge_main = find_active_bridge_main()
     token = read_bridge_token(bridge_main)
     ruby_exporter = SCRIPTS_DIR / "export_current_view.rb"
     if not ruby_exporter.exists():

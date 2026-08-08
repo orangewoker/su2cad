@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SU2CAD",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "identifier": "com.orangewoker.su2cad",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "SU2CAD 0.8.0",
+        "title": "SU2CAD 0.8.1",
         "width": 1440,
         "height": 900,
         "minWidth": 860,

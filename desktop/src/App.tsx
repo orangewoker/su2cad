@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Play,
+  Puzzle,
   RefreshCw,
   RotateCcw,
   Sparkles,
@@ -26,6 +27,7 @@ import {
   DEFAULT_SETTINGS,
   type ExportResult,
   type ExportSettings,
+  type Integrations,
   type Quality,
   type RecentOutput,
   type SidecarEvent,
@@ -127,6 +129,10 @@ function App() {
   const [advancedOpen, setAdvancedOpen] = useState(true);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [serviceError, setServiceError] = useState("");
+  const [integrations, setIntegrations] = useState<Integrations | null>(null);
+  const [showPlugins, setShowPlugins] = useState(false);
+  const [installingPlugins, setInstallingPlugins] = useState(false);
+  const [pluginNotice, setPluginNotice] = useState("");
   const startedAt = useRef<number | null>(null);
 
   const appendLog = useCallback((message: string) => {
@@ -146,7 +152,7 @@ function App() {
     const unsubscribe = sidecar.subscribe((event: SidecarEvent) => {
       if (event.type === "ready") {
         setServiceError("");
-        appendLog(`SU2CAD ${event.version || "0.8.0"} 核心服务已就绪`);
+        appendLog(`SU2CAD ${event.version || "0.8.1"} 核心服务已就绪`);
         void sidecar.send("loadSettings");
         void sidecar.send("status");
         return;
@@ -161,6 +167,7 @@ function App() {
         const running = Boolean(health.ok && health.running);
         setConnected(running);
         setCadRunning(Boolean(event.cadRunning));
+        if (event.integrations) setIntegrations(event.integrations);
         if (running) {
           const title = String(health.title || "未命名模型");
           const version = String(health.sketchup_version || "");
@@ -168,6 +175,17 @@ function App() {
         } else {
           setModelTitle("打开 SketchUp 并启动 SU2CAD / Codex Bridge");
         }
+        return;
+      }
+      if (event.type === "integrations" && event.integrations) {
+        setIntegrations(event.integrations);
+        return;
+      }
+      if (event.type === "pluginsInstalled" && event.integrations) {
+        setIntegrations(event.integrations);
+        setInstallingPlugins(false);
+        setPluginNotice(event.message || "插件已安装，重启 SketchUp 和 CAD 后生效。");
+        appendLog(event.message || "SketchUp / CAD 插件已安装");
         return;
       }
       if (event.type === "exportStarted") {
@@ -219,6 +237,7 @@ function App() {
         return;
       }
       if (event.type === "error") {
+        setInstallingPlugins(false);
         setTaskState((current) => current === "running" ? "error" : current);
         setPhase(event.message || "处理失败");
         startedAt.current = null;
@@ -313,6 +332,30 @@ function App() {
     else void getCurrentWindow().close();
   };
 
+  const handleTitlebarPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || !("__TAURI_INTERNALS__" in window)) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, select, textarea, a, [role='button']")) return;
+    event.preventDefault();
+    if (event.detail >= 2) void getCurrentWindow().toggleMaximize();
+    else void getCurrentWindow().startDragging();
+  };
+
+  const openPluginManager = () => {
+    setPluginNotice("");
+    setShowPlugins(true);
+    void sidecar.send("detectApplications").catch((error) => setServiceError(String(error)));
+  };
+
+  const installAllPlugins = () => {
+    setInstallingPlugins(true);
+    setPluginNotice("");
+    void sidecar.send("installPlugins").catch((error) => {
+      setInstallingPlugins(false);
+      setServiceError(String(error));
+    });
+  };
+
   const resultSummary = result
     ? `${result.material_count} 种材质 · ${result.material_hatches} 个色块 · ${result.block_references} 个块参照 · 审计错误 ${result.audit_errors}`
     : "连接 SketchUp 后即可导出当前视图";
@@ -321,7 +364,7 @@ function App() {
     <div className="app-shell">
       <div className="ambient ambient-one" />
       <div className="ambient ambient-two" />
-      <header className="titlebar" data-tauri-drag-region>
+      <header className="titlebar" data-tauri-drag-region onPointerDown={handleTitlebarPointerDown}>
         <div className="brand" data-tauri-drag-region>
           <div className="brand-mark"><Layers3 size={22} strokeWidth={2.2} /></div>
           <div><strong>SU2CAD</strong><span>VIEW TO DWG</span></div>
@@ -333,6 +376,7 @@ function App() {
         <div className="connection-cluster">
           <span className={`status-chip ${connected ? "online" : "offline"}`}><i />SketchUp {connected ? "已连接" : "未连接"}</span>
           <span className={`status-chip ${cadRunning ? "online" : "standby"}`}><i />CAD {cadRunning ? "已运行" : "未运行"}</span>
+          <button className="plugin-button" type="button" onClick={openPluginManager}><Puzzle size={16} /><span>插件</span></button>
           <button className="icon-button" type="button" aria-label="刷新连接" onClick={() => void sidecar.send("status")}><RefreshCw size={17} /></button>
         </div>
         <WindowControls onRequestClose={requestClose} />
@@ -461,6 +505,35 @@ function App() {
       </footer>
 
       {serviceError && <div className="toast-error"><X size={16} /><span>{serviceError}</span><button type="button" onClick={() => setServiceError("")}><X size={14} /></button></div>}
+
+      {showPlugins && <div className="modal-backdrop" onMouseDown={() => setShowPlugins(false)}>
+        <div className="plugin-modal glass-panel" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="plugin-modal-head">
+            <div className="plugin-modal-icon"><Puzzle size={22} /></div>
+            <div><span className="eyebrow">APPLICATION CONNECTORS</span><h3>SketchUp / CAD 插件</h3></div>
+            <button className="icon-button" type="button" aria-label="关闭插件管理" onClick={() => setShowPlugins(false)}><X size={16} /></button>
+          </div>
+          <p className="plugin-intro">会自动识别本机已安装的 SketchUp 与 AutoCAD 版本，并把连接插件安装到每个用户目录。</p>
+          <div className="plugin-columns">
+            <section className="plugin-card">
+              <div className="plugin-card-title"><strong>SketchUp Bridge</strong><span>{integrations?.sketchup.length || 0} 个版本</span></div>
+              <div className="plugin-list">
+                {!integrations?.sketchup.length && <div className="plugin-empty">未检测到 SketchUp 安装或用户配置。</div>}
+                {integrations?.sketchup.map((item) => <div className="plugin-row" key={`${item.version}-${item.pluginDirectory}`}><div><strong>SketchUp {item.version}</strong><span>{item.pluginDirectory}</span></div><em className={item.nativePluginInstalled ? "installed" : "missing"}>{item.nativePluginInstalled ? "已安装" : "待安装"}</em></div>)}
+              </div>
+            </section>
+            <section className="plugin-card">
+              <div className="plugin-card-title"><strong>AutoCAD Helper</strong><span>{integrations?.cad.length || 0} 个版本</span></div>
+              <div className="plugin-list">
+                {!integrations?.cad.length && <div className="plugin-empty">未检测到 acad.exe，仍可预先安装通用插件。</div>}
+                {integrations?.cad.map((item) => <div className="plugin-row" key={item.executable}><div><strong>{item.name || `AutoCAD ${item.version}`}</strong><span>{item.executable}</span></div><em className={integrations.cadPluginInstalled ? "installed" : "missing"}>{integrations.cadPluginInstalled ? "已安装" : "待安装"}</em></div>)}
+              </div>
+            </section>
+          </div>
+          {pluginNotice && <div className="plugin-notice">{pluginNotice}</div>}
+          <div className="plugin-foot"><p>安装或修复后请重启 SketchUp 和 CAD。分享给别人时也可使用独立 RBZ / Bundle 安装包。</p><div><button type="button" className="glass-button" onClick={() => void sidecar.send("detectApplications")}><RefreshCw size={15} />重新检测</button><button type="button" className="primary-action compact" disabled={installingPlugins} onClick={installAllPlugins}><Puzzle size={16} />{installingPlugins ? "正在安装…" : "一键安装 / 修复"}</button></div></div>
+        </div>
+      </div>}
 
       {confirmAction && <div className="modal-backdrop" onMouseDown={() => setConfirmAction(null)}>
         <div className="confirm-modal glass-panel" onMouseDown={(event) => event.stopPropagation()}>

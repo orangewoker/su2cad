@@ -55,6 +55,8 @@ class SidecarTests(unittest.TestCase):
             os.environ, {"SU2CAD_SETTINGS_PATH": str(Path(directory) / "settings.json")}
         ), mock.patch("app.sidecar.bridge_health", return_value={"ok": True, "running": True}), mock.patch(
             "app.sidecar.cad_is_running", return_value=True
+        ), mock.patch(
+            "app.sidecar.integration_status", return_value={"sketchup": [], "cad": [], "cadPluginInstalled": False, "cadPlugin": {}}
         ):
             save_settings({"paper_size": "AUTO"})
             server = SidecarServer(output)
@@ -69,6 +71,21 @@ class SidecarTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "ready")
         self.assertEqual(events[1]["settings"]["paper_size"], "AUTO")
         self.assertTrue(events[2]["cadRunning"])
+
+    def test_plugin_install_protocol_reports_detected_versions(self) -> None:
+        output = io.StringIO()
+        result = {
+            "status": {"sketchup": [{"version": "2026"}], "cad": [{"version": "2025"}], "cadPluginInstalled": True, "cadPlugin": {}},
+            "restartRequired": True,
+            "sketchupVersions": ["2026"],
+            "cadBundle": "C:/Plugins/SU2CAD.bundle",
+        }
+        with mock.patch("app.sidecar.install_plugins", return_value=result):
+            SidecarServer(output).handle({"command": "installPlugins", "requestId": "plugins"})
+        event = json.loads(output.getvalue())
+        self.assertEqual(event["type"], "pluginsInstalled")
+        self.assertEqual(event["sketchupVersions"], ["2026"])
+        self.assertTrue(event["integrations"]["cadPluginInstalled"])
 
     def test_export_runs_in_background_and_emits_result(self) -> None:
         output = io.StringIO()

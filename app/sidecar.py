@@ -20,6 +20,7 @@ from app.core import (
     export_current_view,
     open_in_cad,
 )
+from app.integrations import integration_status, install_plugins
 
 
 def settings_path() -> Path:
@@ -87,6 +88,7 @@ class SidecarServer:
             health=health,
             cadRunning=cad_is_running(),
             exporting=bool(self._export_thread and self._export_thread.is_alive()),
+            integrations=integration_status(),
         )
 
     def _export(self, request_id: str, raw: dict[str, Any]) -> None:
@@ -172,6 +174,23 @@ class SidecarServer:
                 if self._export_thread and self._export_thread.is_alive():
                     self._cancel_event.set()
                 self.emit("cancelRequested", requestId=request_id, activeId=self._active_id)
+            elif command == "detectApplications":
+                self.emit(
+                    "integrations",
+                    requestId=request_id,
+                    integrations=integration_status(),
+                )
+            elif command == "installPlugins":
+                result = install_plugins()
+                self.emit(
+                    "pluginsInstalled",
+                    requestId=request_id,
+                    integrations=result["status"],
+                    restartRequired=result["restartRequired"],
+                    sketchupVersions=result["sketchupVersions"],
+                    cadBundle=result["cadBundle"],
+                    message="插件已安装，请重启 SketchUp 和 CAD",
+                )
             elif command == "openCad":
                 path = Path(str(message.get("path") or ""))
                 if not path.exists():

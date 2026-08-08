@@ -51,6 +51,27 @@ export interface ExportResult {
   file_size: number;
 }
 
+export interface SketchUpIntegration {
+  version: string;
+  executable: string;
+  pluginDirectory: string;
+  pluginInstalled: boolean;
+  nativePluginInstalled: boolean;
+}
+
+export interface CadIntegration {
+  version: string;
+  name: string;
+  executable: string;
+}
+
+export interface Integrations {
+  sketchup: SketchUpIntegration[];
+  cad: CadIntegration[];
+  cadPluginInstalled: boolean;
+  cadPlugin: Record<string, unknown>;
+}
+
 export interface SidecarEvent {
   type: string;
   requestId?: string | null;
@@ -63,6 +84,10 @@ export interface SidecarEvent {
   health?: Record<string, unknown>;
   cadRunning?: boolean;
   exporting?: boolean;
+  integrations?: Integrations;
+  restartRequired?: boolean;
+  sketchupVersions?: string[];
+  cadBundle?: string;
   details?: string;
   path?: string;
   deleted?: boolean;
