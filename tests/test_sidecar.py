@@ -10,10 +10,22 @@ from pathlib import Path
 from unittest import mock
 
 from app.core import ExportResult
-from app.sidecar import SidecarServer, load_settings, result_payload, save_settings
+from app.sidecar import SidecarServer, configure_standard_streams, load_settings, result_payload, save_settings
 
 
 class SidecarTests(unittest.TestCase):
+    def test_standard_streams_are_forced_to_utf8(self) -> None:
+        streams = []
+        for _ in range(3):
+            stream = mock.Mock()
+            streams.append(stream)
+        with mock.patch("app.sidecar.sys.stdin", streams[0]), mock.patch(
+            "app.sidecar.sys.stdout", streams[1]
+        ), mock.patch("app.sidecar.sys.stderr", streams[2]):
+            configure_standard_streams()
+        for stream in streams:
+            stream.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+
     def test_settings_roundtrip_preserves_unicode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

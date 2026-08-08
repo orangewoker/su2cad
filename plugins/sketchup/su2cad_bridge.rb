@@ -8,7 +8,7 @@ module SU2CADBridgeLoader
       File.join('su2cad_bridge', 'main')
     )
     extension.description = 'Local bridge used by SU2CAD to read the active SketchUp view.'
-    extension.version = '0.8.2'
+    extension.version = '0.8.3'
     extension.creator = 'SU2CAD'
     extension.copyright = '2026 SU2CAD'
     Sketchup.register_extension(extension, true)

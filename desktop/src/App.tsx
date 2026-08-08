@@ -153,7 +153,7 @@ function App() {
     const unsubscribe = sidecar.subscribe((event: SidecarEvent) => {
       if (event.type === "ready") {
         setServiceError("");
-        appendLog(`SU2CAD ${event.version || "0.8.2"} 核心服务已就绪`);
+        appendLog(`SU2CAD ${event.version || "0.8.3"} 核心服务已就绪`);
         void sidecar.send("loadSettings");
         void sidecar.send("status");
         return;

@@ -93,16 +93,16 @@ pwsh -NoProfile -File "$env:USERPROFILE\.codex\skills\su2cad\scripts\export_and_
 
 ## 桌面应用
 
-`dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。v0.8.2 使用 Tauri 2 + React + TypeScript 和 WebView2 渲染响应式液态玻璃界面；原有 Python 几何导出核心作为内置 Sidecar 运行。桌面端可动态识别多个 SketchUp / AutoCAD 版本，并从顶部“插件”面板一键安装或修复连接组件。
+`dev` 分支包含不需要启动 Codex 的 Windows 桌面应用。v0.8.3 使用 Tauri 2 + React + TypeScript 和 WebView2 渲染响应式液态玻璃界面；原有 Python 几何导出核心作为内置 Sidecar 运行。桌面端可动态识别多个 SketchUp / AutoCAD 版本，并从顶部“插件”面板一键安装或修复连接组件。
 
-下载 GitHub Release 中的 `SU2CAD_0.8.2_x64-setup.exe` 并安装。安装包已包含 Python、NumPy、Shapely、DXF 引擎以及 SketchUp / AutoCAD 插件载荷，用户不需要另行安装 Node.js、Rust 或 Python。
+下载 GitHub Release 中的 `SU2CAD_0.8.3_x64-setup.exe` 并安装。安装包已包含 Python、NumPy、Shapely、DXF 引擎以及 SketchUp / AutoCAD 插件载荷，用户不需要另行安装 Node.js、Rust 或 Python。
 
 ### 连接插件
 
 - 桌面端：点击顶部“插件”，可查看检测到的 SketchUp / AutoCAD 版本并一键安装。
-- SketchUp：可单独分享 `SU2CAD-SketchUp-Bridge-0.8.2.rbz`，从扩展程序管理器安装。
-- AutoCAD：可单独分享 `SU2CAD-AutoCAD-Helper-0.8.2.zip`，解压 Bundle 到 `%APPDATA%\Autodesk\ApplicationPlugins\`。
-- 合集：`SU2CAD-Plugins-0.8.2.zip` 包含自动扫描与安装脚本，详见 `plugins/README-安装说明.md`。
+- SketchUp：可单独分享 `SU2CAD-SketchUp-Bridge-0.8.3.rbz`，从扩展程序管理器安装。
+- AutoCAD：可单独分享 `SU2CAD-AutoCAD-Helper-0.8.3.zip`，解压 Bundle 到 `%APPDATA%\Autodesk\ApplicationPlugins\`。
+- 合集：`SU2CAD-Plugins-0.8.3.zip` 包含自动扫描与安装脚本，详见 `plugins/README-安装说明.md`。
 
 ```text
 %LOCALAPPDATA%\SU2CAD\su2cad.exe
@@ -174,7 +174,7 @@ pwsh -NoProfile -File .\build_tauri.ps1
 
 ```text
 desktop\src-tauri\target\release\su2cad.exe
-desktop\src-tauri\target\release\bundle\nsis\SU2CAD_0.8.2_x64-setup.exe
+desktop\src-tauri\target\release\bundle\nsis\SU2CAD_0.8.3_x64-setup.exe
 ```
 
 桌面应用会将设置和最近输出记录保存在：

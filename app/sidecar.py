@@ -24,6 +24,14 @@ from app.core import (
 from app.integrations import integration_status, install_plugins
 
 
+def configure_standard_streams() -> None:
+    """Use UTF-8 for the Tauri JSON-lines protocol on every Windows locale."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def settings_path() -> Path:
     override = os.environ.get("SU2CAD_SETTINGS_PATH")
     if override:
@@ -264,6 +272,7 @@ class SidecarServer:
 
 
 def main() -> int:
+    configure_standard_streams()
     SidecarServer().run()
     return 0
 

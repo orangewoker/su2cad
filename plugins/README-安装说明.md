@@ -1,10 +1,10 @@
-# SU2CAD 连接插件 0.8.2
+# SU2CAD 连接插件 0.8.3
 
 SU2CAD 桌面端内已提供“插件 → 一键安装 / 修复”，会自动识别本机已安装的 SketchUp 和 AutoCAD 版本。本文件夹也可独立分享和安装。
 
 ## 最简单的安装方式
 
-1. 解压整个 `SU2CAD-Plugins-0.8.2.zip`。
+1. 解压整个 `SU2CAD-Plugins-0.8.3.zip`。
 2. 双击 `Install-SU2CAD-Plugins.cmd`。
 3. 关闭后重新打开 SketchUp 和 AutoCAD / 天正。
 
@@ -14,12 +14,12 @@ SU2CAD 桌面端内已提供“插件 → 一键安装 / 修复”，会自动�
 
 1. 在 SketchUp 打开“扩展程序管理器”。
 2. 选择“安装扩展程序”。
-3. 选择 `SU2CAD-SketchUp-Bridge-0.8.2.rbz`。
+3. 选择 `SU2CAD-SketchUp-Bridge-0.8.3.rbz`。
 4. 重启 SketchUp，菜单中会出现 `SU2CAD Bridge`。
 
 ## 单独安装 AutoCAD Bundle
 
-1. 解压 `SU2CAD-AutoCAD-Helper-0.8.2.zip`。
+1. 解压 `SU2CAD-AutoCAD-Helper-0.8.3.zip`。
 2. 把完整的 `SU2CAD.bundle` 复制到 `%APPDATA%\Autodesk\ApplicationPlugins\`。
 3. 重启 AutoCAD / 天正。
 
